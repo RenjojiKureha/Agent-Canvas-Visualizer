@@ -1,0 +1,14 @@
+{
+  "name": "agent-canvas-visualizer",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev -w @acv/server",
+    "dev:web": "npm run dev -w @acv/web",
+    "build": "npm run build -w @acv/shared && npm run build -w @acv/server && npm run build -w @acv/web"
+  }
+}
