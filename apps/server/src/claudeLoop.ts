@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { HitlController } from "./hitl";
 import type { EmitPayload, HitlContext } from "@acv/shared";
+import { handleAnswerDecision } from "./hitlDecision";
 
 type EmitFn = (event: EmitPayload) => void;
 
@@ -94,135 +95,48 @@ export class ClaudeLoop {
         emit({ type: "edge_created", from: this.lastParentNodeId, to: answerNodeId, kind: "depends" });
       }
 
-      const ctx: HitlContext = { kind: "answer_review", answer: currentAnswer };
-      const { checkpointId, promise } = hitl.awaitCheckpoint(ctx);
-      emit({
-        type: "hitl_required",
-        checkpointId,
-        nodeId: answerNodeId,
-        options: ["continue", "revise", "finish"],
-        context: ctx,
-      });
-
-      const decision = await promise;
-      emit({
-        type: "hitl_applied",
-        checkpointId,
-        decision: decision.decision,
-        note: decision.note,
+      const { decision, hitlNodeId } = await handleAnswerDecision({
+        answerNodeId,
+        hitl,
+        emit,
+        nextNodeId: () => this.nextNodeId(),
+        answer: currentAnswer,
       });
 
       if (decision.decision === "finish") {
-        emit({ type: "node_updated", nodeId: answerNodeId, patch: { status: "done" } });
-        const hitlNodeId = this.nextNodeId();
-        emit({
-          type: "node_created",
-          nodeId: hitlNodeId,
-          parentId: answerNodeId,
-          role: "hitl",
-          content: `User: Finish${decision.note ? `\n${decision.note}` : ""}`,
-          status: "done",
-        });
-        emit({ type: "edge_created", from: answerNodeId, to: hitlNodeId, kind: "depends" });
         emit({ type: "run_finished", status: "success" });
         return;
       }
 
-      if (decision.decision === "continue") {
-        const followUp = decision.note || "I agree with your reasoning and support your recommendation. Please proceed and execute everything as proposed.";
-        emit({
-          type: "node_updated",
-          nodeId: answerNodeId,
-          patch: { status: "done" },
-        });
+      this.lastParentNodeId = hitlNodeId;
+      this.currentThinkNodeId = null;
+      this.currentThinkText = "";
+      this.finalText = "";
 
-        const hitlNodeId = this.nextNodeId();
-        emit({
-          type: "node_created",
-          nodeId: hitlNodeId,
-          parentId: answerNodeId,
-          role: "hitl",
-          content: `User: Continue\n${followUp}`,
-          status: "done",
-        });
-        emit({ type: "edge_created", from: answerNodeId, to: hitlNodeId, kind: "depends" });
+      const userMsg = decision.decision === "continue"
+        ? (decision.note || "I agree with your reasoning and support your recommendation. Please proceed and execute everything as proposed.")
+        : (decision.note || "Please improve your answer.");
 
-        this.lastParentNodeId = hitlNodeId;
-        const continuePrompt = `Previous result:\n${currentAnswer}\n\nUser instruction:\n${followUp}\n\nPlease continue based on the instruction above.`;
+      const prompt = decision.decision === "continue"
+        ? `Previous result:\n${currentAnswer}\n\nUser instruction:\n${userMsg}\n\nPlease continue based on the instruction above.`
+        : `Previous answer:\n${currentAnswer}\n\nUser feedback:\n${userMsg}\n\nPlease revise your answer based on the feedback above.`;
 
-        this.currentThinkNodeId = null;
-        this.currentThinkText = "";
-        this.finalText = "";
-
-        try {
-          await this.spawnClaude(continuePrompt);
-          this.finalizeThinkingNode();
-          currentAnswer = this.finalText || "(empty response)";
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          emit({
-            type: "node_created",
-            nodeId: this.nextNodeId(),
-            role: "error",
-            content: `Continue failed: ${msg}`,
-            status: "error",
-          });
-          emit({ type: "run_finished", status: "failed" });
-          return;
-        }
-        continue;
-      }
-
-      if (decision.decision === "revise") {
-        const feedback = decision.note || "Please improve your answer.";
-        emit({
-          type: "node_updated",
-          nodeId: answerNodeId,
-          patch: { status: "done" },
-        });
-
-        const hitlNodeId = this.nextNodeId();
+      try {
+        await this.spawnClaude(prompt);
+        this.finalizeThinkingNode();
+        currentAnswer = this.finalText || "(empty response)";
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
         emit({
           type: "node_created",
-          nodeId: hitlNodeId,
-          parentId: answerNodeId,
-          role: "hitl",
-          content: `User: Revise\n${feedback}`,
-          status: "done",
+          nodeId: this.nextNodeId(),
+          role: "error",
+          content: `${decision.decision === "continue" ? "Continue" : "Revision"} failed: ${msg}`,
+          status: "error",
         });
-        emit({ type: "edge_created", from: answerNodeId, to: hitlNodeId, kind: "depends" });
-
-        this.lastParentNodeId = hitlNodeId;
-        const revisePrompt = `Previous answer:\n${currentAnswer}\n\nUser feedback:\n${feedback}\n\nPlease revise your answer based on the feedback above.`;
-
-        this.currentThinkNodeId = null;
-        this.currentThinkText = "";
-        this.finalText = "";
-
-        try {
-          await this.spawnClaude(revisePrompt);
-          this.finalizeThinkingNode();
-          currentAnswer = this.finalText || "(empty response)";
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          emit({
-            type: "node_created",
-            nodeId: this.nextNodeId(),
-            role: "error",
-            content: `Revision failed: ${msg}`,
-            status: "error",
-          });
-          emit({ type: "run_finished", status: "failed" });
-          return;
-        }
-        // Loop back to show new answer + checkpoint
-        continue;
+        emit({ type: "run_finished", status: "failed" });
+        return;
       }
-
-      // Unknown decision — treat as accept
-      emit({ type: "node_updated", nodeId: answerNodeId, patch: { status: "done" } });
-      emit({ type: "run_finished", status: "success" });
-      return;
     }
   }
 

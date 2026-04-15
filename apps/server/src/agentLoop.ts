@@ -2,6 +2,7 @@ import type { AgentEvent, EmitPayload, HitlContext } from "@acv/shared";
 import type { LlmClient, LlmToolCall } from "./llmClient";
 import type { ToolRegistry } from "./tools/registry";
 import type { HitlController } from "./hitl";
+import { handleAnswerDecision } from "./hitlDecision";
 
 type EmitFn = (event: EmitPayload) => void;
 
@@ -125,36 +126,15 @@ export class AgentLoop {
           });
           emit({ type: "edge_created", from: thinkNodeId, to: answerNodeId, kind: "depends" });
 
-          const ctx: HitlContext = { kind: "answer_review", answer: response.text };
-          const { checkpointId, promise } = this.opts.hitl.awaitCheckpoint(ctx);
-          emit({
-            type: "hitl_required",
-            checkpointId,
-            nodeId: answerNodeId,
-            options: ["continue", "revise", "finish"],
-            context: ctx,
-          });
-
-          const decision = await promise;
-          emit({
-            type: "hitl_applied",
-            checkpointId,
-            decision: decision.decision,
-            note: decision.note,
+          const { decision } = await handleAnswerDecision({
+            answerNodeId,
+            hitl: this.opts.hitl,
+            emit,
+            nextNodeId: () => this.nextNodeId(),
+            answer: response.text || "",
           });
 
           if (decision.decision === "finish") {
-            emit({ type: "node_updated", nodeId: answerNodeId, patch: { status: "done" } });
-            const hitlNodeId = this.nextNodeId();
-            emit({
-              type: "node_created",
-              nodeId: hitlNodeId,
-              parentId: answerNodeId,
-              role: "hitl",
-              content: `User: Finish${decision.note ? `\n${decision.note}` : ""}`,
-              status: "done",
-            });
-            emit({ type: "edge_created", from: answerNodeId, to: hitlNodeId, kind: "depends" });
             emit({ type: "run_finished", status: "success" });
             return;
           }
@@ -162,34 +142,12 @@ export class AgentLoop {
           if (decision.decision === "continue") {
             const followUp = decision.note || "I agree with your reasoning and support your recommendation. Please proceed and execute everything as proposed.";
             this.messages.push({ role: "user", content: followUp });
-            emit({ type: "node_updated", nodeId: answerNodeId, patch: { status: "done" } });
-            const hitlNodeId = this.nextNodeId();
-            emit({
-              type: "node_created",
-              nodeId: hitlNodeId,
-              parentId: answerNodeId,
-              role: "hitl",
-              content: `User: Continue\n${followUp}`,
-              status: "done",
-            });
-            emit({ type: "edge_created", from: answerNodeId, to: hitlNodeId, kind: "depends" });
             continue;
           }
 
           if (decision.decision === "revise") {
             const feedback = decision.note || "Please revise your answer and improve it.";
             this.messages.push({ role: "user", content: feedback });
-            emit({ type: "node_updated", nodeId: answerNodeId, patch: { status: "done" } });
-            const hitlNodeId = this.nextNodeId();
-            emit({
-              type: "node_created",
-              nodeId: hitlNodeId,
-              parentId: answerNodeId,
-              role: "hitl",
-              content: `User: Revise\n${feedback}`,
-              status: "done",
-            });
-            emit({ type: "edge_created", from: answerNodeId, to: hitlNodeId, kind: "depends" });
             continue;
           }
         }
