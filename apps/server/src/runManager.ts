@@ -1,72 +1,84 @@
-﻿import { randomUUID } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import type { AgentEvent } from "@acv/shared";
-import { OpenAIAgentAdapter } from "./openaiAdapter";
+import { LlmClient } from "./llmClient";
+import { ToolRegistry } from "./tools/registry";
+import { HitlController } from "./hitl";
+import { AgentLoop } from "./agentLoop";
+import { createReadFileTool } from "./tools/readFile";
+import { createListFilesTool } from "./tools/listFiles";
+import { createWriteFileTool } from "./tools/writeFile";
 
-type EmitEvent = {
-  [K in AgentEvent["type"]]: Omit<Extract<AgentEvent, { type: K }>, "runId" | "eventId" | "seq" | "ts">;
-}[AgentEvent["type"]];
+const RUN_TTL_MS = 30 * 60 * 1000;
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
 type RunData = {
   seq: number;
   events: AgentEvent[];
   clients: Set<ServerResponse>;
-  waitingCheckpointId?: string;
-  waitingNodeId?: string;
-  prompt?: string;
-  answer?: string;
+  hitl: HitlController;
+  createdAt: number;
+  finishedAt?: number;
 };
 
 export class RunManager {
   private runs = new Map<string, RunData>();
-  private agent = new OpenAIAgentAdapter();
+  private llm = new LlmClient();
+  private cleanupTimer: ReturnType<typeof setInterval>;
+
+  constructor() {
+    this.cleanupTimer = setInterval(() => this.cleanup(), CLEANUP_INTERVAL_MS);
+  }
+
+  destroy() {
+    clearInterval(this.cleanupTimer);
+  }
+
+  private cleanup() {
+    const now = Date.now();
+    for (const [runId, run] of this.runs) {
+      if (run.finishedAt && now - run.finishedAt > RUN_TTL_MS) {
+        this.runs.delete(runId);
+      }
+    }
+  }
 
   startRun(runId: string, prompt: string) {
     const run = this.ensureRun(runId);
-    run.prompt = prompt;
+    const hitl = run.hitl;
 
-    this.emit(runId, { type: "run_started" });
-    this.emit(runId, {
-      type: "node_created",
-      nodeId: "n1",
-      role: "thought",
-      content: `正在请求 Agent (${this.agent.getProviderInfo()})...`,
-      status: "streaming"
+    const sandboxRoot = process.env.SANDBOX_ROOT || process.cwd();
+    const tools = new ToolRegistry();
+    tools.register(createReadFileTool(sandboxRoot));
+    tools.register(createListFilesTool(sandboxRoot));
+    tools.register(createWriteFileTool(sandboxRoot));
+
+    const emit = (event: Record<string, unknown> & { type: string }) => {
+      this.emitEvent(runId, event as any);
+    };
+
+    const loop = new AgentLoop({ runId, prompt, llm: this.llm, tools, hitl, emit });
+
+    void loop.run().then(() => {
+      run.finishedAt = Date.now();
+    }).catch((err) => {
+      console.error(`[run ${runId}] loop crashed:`, err);
+      this.emitEvent(runId, { type: "run_finished", status: "failed" });
+      run.finishedAt = Date.now();
     });
-
-    void this.executeAgent(runId, prompt);
   }
 
-  intervene(runId: string, checkpointId: string, decision: string, note?: string): boolean {
+  intervene(runId: string, checkpointId: string, decision: string, note?: string, modifications?: Record<string, unknown>): boolean {
     const run = this.runs.get(runId);
-    if (!run || run.waitingCheckpointId !== checkpointId || !run.waitingNodeId) return false;
+    if (!run) return false;
+    return run.hitl.resolveCheckpoint(checkpointId, decision, note, modifications);
+  }
 
-    this.emit(runId, {
-      type: "hitl_applied",
-      checkpointId,
-      decision,
-      note
-    });
-
-    this.emit(runId, {
-      type: "node_updated",
-      nodeId: run.waitingNodeId,
-      patch: { content: `人工决策: ${decision}${note ? ` (${note})` : ""}`, status: "done" }
-    });
-
-    this.emit(runId, {
-      type: "node_created",
-      nodeId: "n3",
-      parentId: run.waitingNodeId,
-      role: "observation",
-      content: `Run 完成，人工选择: ${decision}`,
-      status: "done"
-    });
-    this.emit(runId, { type: "edge_created", from: run.waitingNodeId, to: "n3", kind: "depends" });
-    this.emit(runId, { type: "run_finished", status: "success" });
-
-    run.waitingCheckpointId = undefined;
-    run.waitingNodeId = undefined;
+  interrupt(runId: string, type: string, content?: string): boolean {
+    const run = this.runs.get(runId);
+    if (!run) return false;
+    const validTypes = ["inject_message", "pause", "abort"];
+    if (!validTypes.includes(type)) return false;
+    run.hitl.enqueueInterrupt({ type: type as "inject_message" | "pause" | "abort", content });
     return true;
   }
 
@@ -80,7 +92,6 @@ export class RunManager {
     const hb = setInterval(() => {
       res.write(`:heartbeat ${Date.now()}\n\n`);
     }, 15000);
-
     res.on("close", () => clearInterval(hb));
   }
 
@@ -94,93 +105,7 @@ export class RunManager {
     return this.runs.get(runId)?.events ?? [];
   }
 
-  private async executeAgent(runId: string, prompt: string) {
-    if (!this.agent.isReady()) {
-      this.emit(runId, {
-        type: "node_updated",
-        nodeId: "n1",
-        patch: {
-          content: "AGENT_API_KEY 未设置，无法调用模型。",
-          status: "error"
-        }
-      });
-      this.emit(runId, { type: "run_finished", status: "failed" });
-      return;
-    }
-
-    let answer = "";
-
-    try {
-      answer = await this.agent.generate({
-        prompt,
-        onDelta: (delta) => {
-          answer += delta;
-          this.emit(runId, {
-            type: "node_updated",
-            nodeId: "n1",
-            patch: {
-              content: answer,
-              status: "streaming"
-            }
-          });
-        }
-      });
-
-      this.emit(runId, {
-        type: "node_updated",
-        nodeId: "n1",
-        patch: {
-          content: answer || "(空响应)",
-          status: "done"
-        }
-      });
-
-      this.emit(runId, {
-        type: "node_created",
-        nodeId: "n2",
-        parentId: "n1",
-        role: "action",
-        content: "模型回答已生成，请人工确认是否采纳。",
-        status: "waiting_human"
-      });
-      this.emit(runId, { type: "edge_created", from: "n1", to: "n2", kind: "plan" });
-
-      const checkpointId = `cp_${randomUUID().slice(0, 8)}`;
-      const run = this.ensureRun(runId);
-      run.waitingCheckpointId = checkpointId;
-      run.waitingNodeId = "n2";
-      run.answer = answer;
-
-      this.emit(runId, {
-        type: "hitl_required",
-        checkpointId,
-        nodeId: "n2",
-        options: ["accept", "revise", "retry"]
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.emit(runId, {
-        type: "node_updated",
-        nodeId: "n1",
-        patch: {
-          content: `模型调用失败: ${message}`,
-          status: "error"
-        }
-      });
-      this.emit(runId, { type: "run_finished", status: "failed" });
-    }
-  }
-
-  private ensureRun(runId: string): RunData {
-    let run = this.runs.get(runId);
-    if (!run) {
-      run = { seq: 0, events: [], clients: new Set() };
-      this.runs.set(runId, run);
-    }
-    return run;
-  }
-
-  private emit(runId: string, event: EmitEvent) {
+  private emitEvent(runId: string, event: Record<string, unknown> & { type: string }) {
     const run = this.ensureRun(runId);
     run.seq += 1;
     const fullEvent = {
@@ -188,7 +113,7 @@ export class RunManager {
       runId,
       eventId: `${runId}:${run.seq}`,
       seq: run.seq,
-      ts: Date.now()
+      ts: Date.now(),
     } as AgentEvent;
 
     run.events.push(fullEvent);
@@ -199,5 +124,20 @@ export class RunManager {
     res.write(`id: ${event.seq}\n`);
     res.write(`event: ${event.type}\n`);
     res.write(`data: ${JSON.stringify(event)}\n\n`);
+  }
+
+  private ensureRun(runId: string): RunData {
+    let run = this.runs.get(runId);
+    if (!run) {
+      run = {
+        seq: 0,
+        events: [],
+        clients: new Set(),
+        hitl: new HitlController(),
+        createdAt: Date.now(),
+      };
+      this.runs.set(runId, run);
+    }
+    return run;
   }
 }

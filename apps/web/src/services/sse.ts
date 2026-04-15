@@ -1,25 +1,52 @@
-﻿import type { AgentEvent } from "@acv/shared";
+import type { AgentEvent } from "@acv/shared";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8787";
+
+async function extractError(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = await res.json();
+    if (typeof body.error === "string") return body.error;
+  } catch { /* ignore */ }
+  return `${fallback} (${res.status})`;
+}
 
 export async function startRunRequest(prompt: string): Promise<string> {
   const res = await fetch(`${API_BASE}/runs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt })
+    body: JSON.stringify({ prompt }),
   });
-  if (!res.ok) throw new Error("Failed to start run");
+  if (!res.ok) throw new Error(await extractError(res, "Failed to start run"));
   const data = await res.json();
   return data.runId as string;
 }
 
-export async function interveneRequest(runId: string, checkpointId: string, decision: string) {
+export async function interveneRequest(
+  runId: string,
+  checkpointId: string,
+  decision: string,
+  note?: string,
+  modifications?: Record<string, unknown>,
+) {
   const res = await fetch(`${API_BASE}/runs/${runId}/intervene`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ checkpointId, decision })
+    body: JSON.stringify({ checkpointId, decision, note, modifications }),
   });
-  if (!res.ok) throw new Error("Failed to intervene");
+  if (!res.ok) throw new Error(await extractError(res, "Failed to intervene"));
+}
+
+export async function interruptRequest(
+  runId: string,
+  type: string,
+  content?: string,
+) {
+  const res = await fetch(`${API_BASE}/runs/${runId}/interrupt`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type, content }),
+  });
+  if (!res.ok) throw new Error(await extractError(res, "Failed to interrupt"));
 }
 
 export function connectRunStream(runId: string, onEvent: (e: AgentEvent) => void) {
@@ -31,18 +58,24 @@ export function connectRunStream(runId: string, onEvent: (e: AgentEvent) => void
     "edge_created",
     "hitl_required",
     "hitl_applied",
-    "run_finished"
+    "tool_executed",
+    "loop_step",
+    "run_finished",
   ];
 
   names.forEach((name) => {
     source.addEventListener(name, (message) => {
-      const parsed = JSON.parse((message as MessageEvent).data) as AgentEvent;
-      onEvent(parsed);
+      try {
+        const parsed = JSON.parse((message as MessageEvent).data) as AgentEvent;
+        onEvent(parsed);
+      } catch {
+        console.warn(`[sse] Failed to parse event "${name}":`, (message as MessageEvent).data);
+      }
     });
   });
 
   source.onerror = () => {
-    // EventSource auto-reconnects.
+    // EventSource auto-reconnects
   };
 
   return source;
