@@ -64,7 +64,7 @@ function onArgsUpdate(args: Record<string, unknown>) {
           v-model="note"
           rows="2"
           class="hitl-note"
-          placeholder="Enter follow-up instruction for Continue, or feedback for Revise..."
+          placeholder="Optional: add your thoughts, or leave empty to let agent continue freely..."
         />
         <div class="hitl-actions">
           <button class="hitl-approve" @click="decide('continue')">Continue</button>
