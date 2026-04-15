@@ -245,6 +245,7 @@ export class ClaudeLoop {
 
       this.child.on("close", (code) => {
         if (stdoutBuf.trim()) handleLine(stdoutBuf);
+        this.child = null;
 
         if (this.aborted) {
           resolve();

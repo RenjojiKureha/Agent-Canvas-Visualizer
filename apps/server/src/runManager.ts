@@ -47,8 +47,18 @@ export class RunManager {
   private cleanup() {
     const now = Date.now();
     for (const [runId, run] of this.runs) {
+      // Clean up finished runs after TTL
       if (run.finishedAt && now - run.finishedAt > RUN_TTL_MS) {
         this.runs.delete(runId);
+        continue;
+      }
+      // Auto-abort orphaned runs: no clients connected, HITL waiting, not finished
+      if (!run.finishedAt && run.clients.size === 0 && run.hitl.getPendingCheckpointId()) {
+        console.log(`[acv-server] auto-aborting orphaned run ${runId}`);
+        run.hitl.enqueueInterrupt({ type: "abort" });
+        // Also resolve any pending checkpoint so the loop can exit
+        const cpId = run.hitl.getPendingCheckpointId();
+        if (cpId) run.hitl.resolveCheckpoint(cpId, "finish");
       }
     }
   }
