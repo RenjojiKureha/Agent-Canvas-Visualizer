@@ -14,6 +14,23 @@ const checkpoint = computed(() => store.currentCheckpoint);
 const stepInfo = computed(() => store.stepInfo);
 const provider = computed(() => store.graph.provider);
 const isApiMode = computed(() => provider.value === "api" || !provider.value);
+const runStatus = computed(() => store.graph.runStatus);
+
+const statusBanner = computed(() => {
+  switch (runStatus.value) {
+    case "streaming":
+    case "resumed":
+      return { text: "Agent is working...", cls: "status-working" };
+    case "waiting_human":
+      return { text: "Waiting for your decision", cls: "status-waiting" };
+    case "finished":
+      return { text: "Run completed", cls: "status-finished" };
+    case "error":
+      return { text: "Run failed", cls: "status-error" };
+    default:
+      return null;
+  }
+});
 
 async function start() {
   if (loading.value) return;
@@ -77,10 +94,12 @@ async function onHitlDecide(decision: string, note?: string, modifications?: Rec
     <section class="panel" style="margin-bottom: 12px">
       <div class="meta">
         <span>runId: {{ store.graph.runId || "-" }}</span>
-        <span>status: {{ store.graph.runStatus }}{{ isRunning ? " ..." : "" }}</span>
         <span v-if="isApiMode">step: {{ stepInfo.current }}/{{ stepInfo.max || "?" }}</span>
         <span>provider: {{ provider || "-" }}</span>
         <span>lastSeq: {{ store.graph.lastSeq }}</span>
+      </div>
+      <div v-if="statusBanner" :class="['status-banner', statusBanner.cls]">
+        {{ statusBanner.text }}
       </div>
       <DagCanvas :nodes="store.nodes" :edges="store.graph.edges" />
     </section>

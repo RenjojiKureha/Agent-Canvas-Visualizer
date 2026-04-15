@@ -113,19 +113,40 @@ export class ClaudeLoop {
 
       if (decision.decision === "finish") {
         emit({ type: "node_updated", nodeId: answerNodeId, patch: { status: "done" } });
+        const hitlNodeId = this.nextNodeId();
+        emit({
+          type: "node_created",
+          nodeId: hitlNodeId,
+          parentId: answerNodeId,
+          role: "hitl",
+          content: `User: Finish${decision.note ? `\n${decision.note}` : ""}`,
+          status: "done",
+        });
+        emit({ type: "edge_created", from: answerNodeId, to: hitlNodeId, kind: "depends" });
         emit({ type: "run_finished", status: "success" });
         return;
       }
 
       if (decision.decision === "continue") {
-        const followUp = decision.note || "Please continue with the next step.";
+        const followUp = decision.note || "I agree with your reasoning and support your recommendation. Please proceed and execute everything as proposed.";
         emit({
           type: "node_updated",
           nodeId: answerNodeId,
           patch: { status: "done" },
         });
 
-        this.lastParentNodeId = answerNodeId;
+        const hitlNodeId = this.nextNodeId();
+        emit({
+          type: "node_created",
+          nodeId: hitlNodeId,
+          parentId: answerNodeId,
+          role: "hitl",
+          content: `User: Continue\n${followUp}`,
+          status: "done",
+        });
+        emit({ type: "edge_created", from: answerNodeId, to: hitlNodeId, kind: "depends" });
+
+        this.lastParentNodeId = hitlNodeId;
         const continuePrompt = `Previous result:\n${currentAnswer}\n\nUser instruction:\n${followUp}\n\nPlease continue based on the instruction above.`;
 
         this.currentThinkNodeId = null;
@@ -156,11 +177,21 @@ export class ClaudeLoop {
         emit({
           type: "node_updated",
           nodeId: answerNodeId,
-          patch: { content: `${currentAnswer}\n\n[Revision requested: ${feedback}]`, status: "done" },
+          patch: { status: "done" },
         });
 
-        // Spawn new Claude CLI with revision prompt
-        this.lastParentNodeId = answerNodeId;
+        const hitlNodeId = this.nextNodeId();
+        emit({
+          type: "node_created",
+          nodeId: hitlNodeId,
+          parentId: answerNodeId,
+          role: "hitl",
+          content: `User: Revise\n${feedback}`,
+          status: "done",
+        });
+        emit({ type: "edge_created", from: answerNodeId, to: hitlNodeId, kind: "depends" });
+
+        this.lastParentNodeId = hitlNodeId;
         const revisePrompt = `Previous answer:\n${currentAnswer}\n\nUser feedback:\n${feedback}\n\nPlease revise your answer based on the feedback above.`;
 
         this.currentThinkNodeId = null;

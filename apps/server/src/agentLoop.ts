@@ -146,29 +146,51 @@ export class AgentLoop {
 
           if (decision.decision === "finish") {
             emit({ type: "node_updated", nodeId: answerNodeId, patch: { status: "done" } });
+            const hitlNodeId = this.nextNodeId();
+            emit({
+              type: "node_created",
+              nodeId: hitlNodeId,
+              parentId: answerNodeId,
+              role: "hitl",
+              content: `User: Finish${decision.note ? `\n${decision.note}` : ""}`,
+              status: "done",
+            });
+            emit({ type: "edge_created", from: answerNodeId, to: hitlNodeId, kind: "depends" });
             emit({ type: "run_finished", status: "success" });
             return;
           }
 
           if (decision.decision === "continue") {
-            const followUp = decision.note || "Please continue with the next step.";
+            const followUp = decision.note || "I agree with your reasoning and support your recommendation. Please proceed and execute everything as proposed.";
             this.messages.push({ role: "user", content: followUp });
+            emit({ type: "node_updated", nodeId: answerNodeId, patch: { status: "done" } });
+            const hitlNodeId = this.nextNodeId();
             emit({
-              type: "node_updated",
-              nodeId: answerNodeId,
-              patch: { status: "done" },
+              type: "node_created",
+              nodeId: hitlNodeId,
+              parentId: answerNodeId,
+              role: "hitl",
+              content: `User: Continue\n${followUp}`,
+              status: "done",
             });
+            emit({ type: "edge_created", from: answerNodeId, to: hitlNodeId, kind: "depends" });
             continue;
           }
 
           if (decision.decision === "revise") {
             const feedback = decision.note || "Please revise your answer and improve it.";
             this.messages.push({ role: "user", content: feedback });
+            emit({ type: "node_updated", nodeId: answerNodeId, patch: { status: "done" } });
+            const hitlNodeId = this.nextNodeId();
             emit({
-              type: "node_updated",
-              nodeId: answerNodeId,
-              patch: { content: `${response.text}\n\n[Revision requested: ${feedback}]`, status: "done" },
+              type: "node_created",
+              nodeId: hitlNodeId,
+              parentId: answerNodeId,
+              role: "hitl",
+              content: `User: Revise\n${feedback}`,
+              status: "done",
             });
+            emit({ type: "edge_created", from: answerNodeId, to: hitlNodeId, kind: "depends" });
             continue;
           }
         }
