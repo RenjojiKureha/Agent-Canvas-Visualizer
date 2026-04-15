@@ -58,10 +58,10 @@ export const useAgentRunStore = defineStore("agent-run", () => {
     },
   );
 
-  async function startRun(prompt: string) {
+  async function startRun(prompt: string, projectPath?: string) {
     closeStream();
     graph.value = createInitialGraphState();
-    const runId = await startRunRequest(prompt);
+    const runId = await startRunRequest(prompt, projectPath);
     activeRunId = runId;
     currentSource = connectRunStream(runId, enqueue);
   }

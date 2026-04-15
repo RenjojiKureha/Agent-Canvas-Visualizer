@@ -79,7 +79,10 @@ const server = createServer(async (req, res) => {
     }
 
     const runId = randomUUID();
-    manager.startRun(runId, prompt);
+    const projectPath = typeof body.projectPath === "string" && body.projectPath.trim().length > 0
+      ? body.projectPath.trim()
+      : undefined;
+    manager.startRun(runId, prompt, projectPath);
     res.writeHead(201, { "Content-Type": "application/json", ...cors });
     res.end(JSON.stringify({ runId }));
     return;

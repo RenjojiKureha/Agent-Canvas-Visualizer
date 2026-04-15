@@ -63,9 +63,10 @@ export class RunManager {
     }
   }
 
-  startRun(runId: string, prompt: string) {
+  startRun(runId: string, prompt: string, projectPath?: string) {
     const run = this.ensureRun(runId);
     const hitl = run.hitl;
+    const workDir = projectPath || process.env.SANDBOX_ROOT || process.cwd();
 
     const emit = (event: Record<string, unknown> & { type: string }) => {
       this.emitEvent(runId, event as any);
@@ -73,7 +74,7 @@ export class RunManager {
 
     if (this.provider === "claude") {
       // Claude Code CLI mode
-      const loop = new ClaudeLoop({ runId, prompt, hitl, emit });
+      const loop = new ClaudeLoop({ runId, prompt, hitl, emit, cwd: workDir });
 
       void loop.run().then(() => {
         run.finishedAt = Date.now();
@@ -84,11 +85,10 @@ export class RunManager {
       });
     } else {
       // API mode — agent loop with tools
-      const sandboxRoot = process.env.SANDBOX_ROOT || process.cwd();
       const tools = new ToolRegistry();
-      tools.register(createReadFileTool(sandboxRoot));
-      tools.register(createListFilesTool(sandboxRoot));
-      tools.register(createWriteFileTool(sandboxRoot));
+      tools.register(createReadFileTool(workDir));
+      tools.register(createListFilesTool(workDir));
+      tools.register(createWriteFileTool(workDir));
 
       const loop = new AgentLoop({ runId, prompt, llm: this.llm!, tools, hitl, emit });
 

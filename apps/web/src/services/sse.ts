@@ -10,11 +10,11 @@ async function extractError(res: Response, fallback: string): Promise<string> {
   return `${fallback} (${res.status})`;
 }
 
-export async function startRunRequest(prompt: string): Promise<string> {
+export async function startRunRequest(prompt: string, projectPath?: string): Promise<string> {
   const res = await fetch(`${API_BASE}/runs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt }),
+    body: JSON.stringify({ prompt, projectPath: projectPath || undefined }),
   });
   if (!res.ok) throw new Error(await extractError(res, "Failed to start run"));
   const data = await res.json();

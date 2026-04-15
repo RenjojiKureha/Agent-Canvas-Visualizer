@@ -10,6 +10,7 @@ interface ClaudeLoopOptions {
   hitl: HitlController;
   emit: EmitFn;
   claudeCommand?: string;
+  cwd?: string;
 }
 
 /**
@@ -247,6 +248,7 @@ export class ClaudeLoop {
         shell: true,
         env: process.env,
         windowsHide: true,
+        cwd: this.opts.cwd || undefined,
       });
 
       // Pass prompt via stdin to avoid shell argument splitting

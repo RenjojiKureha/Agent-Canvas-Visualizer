@@ -6,6 +6,7 @@ import { useAgentRunStore } from "./stores/agentRun";
 
 const store = useAgentRunStore();
 const prompt = ref("Please analyze this project structure and suggest improvements.");
+const projectPath = ref("");
 const loading = ref(false);
 const error = ref("");
 
@@ -37,7 +38,7 @@ async function start() {
   loading.value = true;
   error.value = "";
   try {
-    await store.startRun(prompt.value);
+    await store.startRun(prompt.value, projectPath.value || undefined);
   } catch (e: any) {
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -80,6 +81,17 @@ async function onHitlDecide(decision: string, note?: string, modifications?: Rec
     </section>
 
     <div v-if="error" class="error-bar">{{ error }}</div>
+
+    <section class="panel" style="margin-bottom: 12px">
+      <div style="font-size: 13px; color: var(--muted); margin-bottom: 6px">Project Path</div>
+      <input
+        v-model="projectPath"
+        type="text"
+        :disabled="isRunning"
+        placeholder="Leave empty for server's working directory"
+        style="width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-size: 14px; font-family: monospace; background: var(--panel); color: var(--text)"
+      />
+    </section>
 
     <section class="panel" style="margin-bottom: 12px">
       <div style="font-size: 13px; color: var(--muted); margin-bottom: 6px">Prompt</div>
