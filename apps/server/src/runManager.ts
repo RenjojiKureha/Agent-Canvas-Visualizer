@@ -1,5 +1,5 @@
 import type { ServerResponse } from "node:http";
-import type { AgentEvent } from "@acv/shared";
+import type { AgentEvent, EmitPayload } from "@acv/shared";
 import { LlmClient } from "./llmClient";
 import { ToolRegistry } from "./tools/registry";
 import { HitlController } from "./hitl";
@@ -68,8 +68,8 @@ export class RunManager {
     const hitl = run.hitl;
     const workDir = projectPath || process.env.SANDBOX_ROOT || process.cwd();
 
-    const emit = (event: Record<string, unknown> & { type: string }) => {
-      this.emitEvent(runId, event as any);
+    const emit = (event: EmitPayload) => {
+      this.emitEvent(runId, event);
     };
 
     if (this.provider === "claude") {
@@ -140,7 +140,7 @@ export class RunManager {
     return this.runs.get(runId)?.events ?? [];
   }
 
-  private emitEvent(runId: string, event: Record<string, unknown> & { type: string }) {
+  private emitEvent(runId: string, event: EmitPayload) {
     const run = this.ensureRun(runId);
     run.seq += 1;
     const fullEvent = {

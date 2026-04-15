@@ -63,6 +63,53 @@ export type AgentEvent =
     })
   | (BaseEvent & { type: "run_finished"; status: "success" | "failed" | "aborted" });
 
+/** Payload for emitting events — BaseEvent fields are added by RunManager */
+export type EmitPayload =
+  | { type: "run_started"; provider?: "api" | "claude" }
+  | {
+      type: "node_created";
+      nodeId: string;
+      parentId?: string;
+      role: NodeRole;
+      content: string;
+      status?: NodeStatus;
+      toolName?: string;
+      toolArgs?: Record<string, unknown>;
+    }
+  | {
+      type: "node_updated";
+      nodeId: string;
+      patch: Partial<Pick<GraphNode, "content" | "status">>;
+    }
+  | {
+      type: "edge_created";
+      from: string;
+      to: string;
+      kind: "plan" | "depends" | "calls" | "tool";
+    }
+  | {
+      type: "hitl_required";
+      checkpointId: string;
+      nodeId: string;
+      options: string[];
+      context?: HitlContext;
+    }
+  | {
+      type: "hitl_applied";
+      checkpointId: string;
+      decision: string;
+      note?: string;
+      modifications?: Record<string, unknown>;
+    }
+  | {
+      type: "tool_executed";
+      nodeId: string;
+      toolName: string;
+      result: ToolResultData;
+    }
+  | { type: "loop_step"; step: number; maxSteps: number }
+  | { type: "run_finished"; status: "success" | "failed" | "aborted" };
+
 export interface HitlContext {
   kind: "tool_approval" | "answer_review" | "error_recovery";
   toolName?: string;

@@ -1,8 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { HitlController } from "./hitl";
-import type { HitlContext } from "@acv/shared";
+import type { EmitPayload, HitlContext } from "@acv/shared";
 
-type EmitFn = (event: Record<string, unknown> & { type: string }) => void;
+type EmitFn = (event: EmitPayload) => void;
 
 interface ClaudeLoopOptions {
   runId: string;

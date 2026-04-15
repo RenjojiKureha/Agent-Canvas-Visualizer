@@ -1,10 +1,9 @@
-import type { AgentEvent, HitlContext } from "@acv/shared";
+import type { AgentEvent, EmitPayload, HitlContext } from "@acv/shared";
 import type { LlmClient, LlmToolCall } from "./llmClient";
 import type { ToolRegistry } from "./tools/registry";
 import type { HitlController } from "./hitl";
 
-// Use Record instead of Omit<UnionType> to avoid TS excess property checking issues
-type EmitFn = (event: Record<string, unknown> & { type: string }) => void;
+type EmitFn = (event: EmitPayload) => void;
 
 interface AgentLoopOptions {
   runId: string;
