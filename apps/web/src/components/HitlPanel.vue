@@ -60,8 +60,14 @@ function onArgsUpdate(args: Record<string, unknown>) {
         <div v-if="context?.answer" class="hitl-answer-preview">
           <pre>{{ context.answer.slice(0, 500) }}{{ (context.answer.length ?? 0) > 500 ? "..." : "" }}</pre>
         </div>
+        <textarea
+          v-model="note"
+          rows="2"
+          class="hitl-note"
+          placeholder="Enter follow-up instruction for Continue, or feedback for Revise..."
+        />
         <div class="hitl-actions">
-          <button class="hitl-approve" @click="decide('accept')">Accept</button>
+          <button class="hitl-approve" @click="decide('continue')">Continue</button>
           <button class="hitl-modify" @click="decide('revise')">Revise</button>
           <button class="hitl-finish" @click="decide('finish')">Finish</button>
         </div>
@@ -75,7 +81,9 @@ function onArgsUpdate(args: Record<string, unknown>) {
         </div>
       </template>
 
+      <!-- Note input for non-answer-review panels (tool approval, error recovery) -->
       <textarea
+        v-if="kind !== 'answer_review'"
         v-model="note"
         rows="2"
         class="hitl-note"

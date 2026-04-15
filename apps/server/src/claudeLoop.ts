@@ -99,7 +99,7 @@ export class ClaudeLoop {
         type: "hitl_required",
         checkpointId,
         nodeId: answerNodeId,
-        options: ["accept", "revise", "finish"],
+        options: ["continue", "revise", "finish"],
         context: ctx,
       });
 
@@ -111,10 +111,44 @@ export class ClaudeLoop {
         note: decision.note,
       });
 
-      if (decision.decision === "accept" || decision.decision === "finish") {
+      if (decision.decision === "finish") {
         emit({ type: "node_updated", nodeId: answerNodeId, patch: { status: "done" } });
         emit({ type: "run_finished", status: "success" });
         return;
+      }
+
+      if (decision.decision === "continue") {
+        const followUp = decision.note || "Please continue with the next step.";
+        emit({
+          type: "node_updated",
+          nodeId: answerNodeId,
+          patch: { status: "done" },
+        });
+
+        this.lastParentNodeId = answerNodeId;
+        const continuePrompt = `Previous result:\n${currentAnswer}\n\nUser instruction:\n${followUp}\n\nPlease continue based on the instruction above.`;
+
+        this.currentThinkNodeId = null;
+        this.currentThinkText = "";
+        this.finalText = "";
+
+        try {
+          await this.spawnClaude(continuePrompt);
+          this.finalizeThinkingNode();
+          currentAnswer = this.finalText || "(empty response)";
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          emit({
+            type: "node_created",
+            nodeId: this.nextNodeId(),
+            role: "error",
+            content: `Continue failed: ${msg}`,
+            status: "error",
+          });
+          emit({ type: "run_finished", status: "failed" });
+          return;
+        }
+        continue;
       }
 
       if (decision.decision === "revise") {

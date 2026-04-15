@@ -132,7 +132,7 @@ export class AgentLoop {
             type: "hitl_required",
             checkpointId,
             nodeId: answerNodeId,
-            options: ["accept", "revise", "finish"],
+            options: ["continue", "revise", "finish"],
             context: ctx,
           });
 
@@ -144,10 +144,21 @@ export class AgentLoop {
             note: decision.note,
           });
 
-          if (decision.decision === "accept" || decision.decision === "finish") {
+          if (decision.decision === "finish") {
             emit({ type: "node_updated", nodeId: answerNodeId, patch: { status: "done" } });
             emit({ type: "run_finished", status: "success" });
             return;
+          }
+
+          if (decision.decision === "continue") {
+            const followUp = decision.note || "Please continue with the next step.";
+            this.messages.push({ role: "user", content: followUp });
+            emit({
+              type: "node_updated",
+              nodeId: answerNodeId,
+              patch: { status: "done" },
+            });
+            continue;
           }
 
           if (decision.decision === "revise") {
