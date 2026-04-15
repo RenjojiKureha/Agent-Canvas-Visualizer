@@ -176,7 +176,6 @@ export class ClaudeLoop {
         "--verbose",
         "--output-format", "stream-json",
         "--include-partial-messages",
-        prompt,
       ];
 
       this.child = spawn(this.claudeCommand, args, {
@@ -184,6 +183,10 @@ export class ClaudeLoop {
         env: process.env,
         windowsHide: true,
       });
+
+      // Pass prompt via stdin to avoid shell argument splitting
+      this.child.stdin!.write(prompt);
+      this.child.stdin!.end();
 
       let stdoutBuf = "";
       let stderrBuf = "";
