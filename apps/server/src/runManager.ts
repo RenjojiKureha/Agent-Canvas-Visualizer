@@ -4,9 +4,12 @@ import { LlmClient } from "./llmClient";
 import { ToolRegistry } from "./tools/registry";
 import { HitlController } from "./hitl";
 import { AgentLoop } from "./agentLoop";
+import { ClaudeLoop } from "./claudeLoop";
 import { createReadFileTool } from "./tools/readFile";
 import { createListFilesTool } from "./tools/listFiles";
 import { createWriteFileTool } from "./tools/writeFile";
+
+type AgentProvider = "api" | "claude";
 
 const RUN_TTL_MS = 30 * 60 * 1000;
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
@@ -22,10 +25,18 @@ type RunData = {
 
 export class RunManager {
   private runs = new Map<string, RunData>();
-  private llm = new LlmClient();
+  private llm: LlmClient | null;
+  private provider: AgentProvider;
   private cleanupTimer: ReturnType<typeof setInterval>;
 
   constructor() {
+    const providerRaw = (process.env.AGENT_PROVIDER || "api").toLowerCase();
+    this.provider = providerRaw === "claude" ? "claude" : "api";
+
+    // Only create LlmClient for API provider
+    this.llm = this.provider === "api" ? new LlmClient() : null;
+
+    console.log(`[acv-server] agent provider: ${this.provider}`);
     this.cleanupTimer = setInterval(() => this.cleanup(), CLEANUP_INTERVAL_MS);
   }
 
@@ -46,25 +57,39 @@ export class RunManager {
     const run = this.ensureRun(runId);
     const hitl = run.hitl;
 
-    const sandboxRoot = process.env.SANDBOX_ROOT || process.cwd();
-    const tools = new ToolRegistry();
-    tools.register(createReadFileTool(sandboxRoot));
-    tools.register(createListFilesTool(sandboxRoot));
-    tools.register(createWriteFileTool(sandboxRoot));
-
     const emit = (event: Record<string, unknown> & { type: string }) => {
       this.emitEvent(runId, event as any);
     };
 
-    const loop = new AgentLoop({ runId, prompt, llm: this.llm, tools, hitl, emit });
+    if (this.provider === "claude") {
+      // Claude Code CLI mode
+      const loop = new ClaudeLoop({ runId, prompt, hitl, emit });
 
-    void loop.run().then(() => {
-      run.finishedAt = Date.now();
-    }).catch((err) => {
-      console.error(`[run ${runId}] loop crashed:`, err);
-      this.emitEvent(runId, { type: "run_finished", status: "failed" });
-      run.finishedAt = Date.now();
-    });
+      void loop.run().then(() => {
+        run.finishedAt = Date.now();
+      }).catch((err) => {
+        console.error(`[run ${runId}] claude loop crashed:`, err);
+        this.emitEvent(runId, { type: "run_finished", status: "failed" });
+        run.finishedAt = Date.now();
+      });
+    } else {
+      // API mode — agent loop with tools
+      const sandboxRoot = process.env.SANDBOX_ROOT || process.cwd();
+      const tools = new ToolRegistry();
+      tools.register(createReadFileTool(sandboxRoot));
+      tools.register(createListFilesTool(sandboxRoot));
+      tools.register(createWriteFileTool(sandboxRoot));
+
+      const loop = new AgentLoop({ runId, prompt, llm: this.llm!, tools, hitl, emit });
+
+      void loop.run().then(() => {
+        run.finishedAt = Date.now();
+      }).catch((err) => {
+        console.error(`[run ${runId}] agent loop crashed:`, err);
+        this.emitEvent(runId, { type: "run_finished", status: "failed" });
+        run.finishedAt = Date.now();
+      });
+    }
   }
 
   intervene(runId: string, checkpointId: string, decision: string, note?: string, modifications?: Record<string, unknown>): boolean {
