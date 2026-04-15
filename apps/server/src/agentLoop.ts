@@ -45,7 +45,7 @@ export class AgentLoop {
   async run(): Promise<void> {
     const { emit } = this.opts;
 
-    emit({ type: "run_started" });
+    emit({ type: "run_started", provider: "api" });
 
     this.messages.push({ role: "system", content: this.opts.systemPrompt });
     this.messages.push({ role: "user", content: this.opts.prompt });

@@ -13,54 +13,51 @@ interface ClaudeLoopOptions {
 }
 
 /**
- * Runs Claude Code CLI in stream-json mode, parses its output,
- * and maps each event to DAG nodes.
+ * Runs Claude Code CLI and maps its stream-json output to DAG nodes.
  *
- * Claude CLI outputs JSON lines with types:
- * - { type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "..." } } }
- * - { type: "stream_event", event: { type: "content_block_start", content_block: { type: "tool_use", name: "...", id: "..." } } }
- * - { type: "stream_event", event: { type: "content_block_delta", delta: { type: "input_json_delta", partial_json: "..." } } }
- * - { type: "stream_event", event: { type: "content_block_stop" } }
- * - { type: "stream_event", event: { type: "message_start" | "message_delta" | "message_stop" } }
- * - { type: "result", result: "..." }
- *
- * Tool use events from Claude CLI (--verbose mode):
- * - { type: "tool_use", tool: "...", input: {...} }
- * - { type: "tool_result", tool: "...", content: "..." }
+ * Real CLI output format (verified):
+ *   {"type":"system","subtype":"init",...}
+ *   {"type":"assistant","message":{"content":[{"type":"thinking","thinking":"..."}]}}
+ *   {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{...}}]}}
+ *   {"type":"assistant","message":{"content":[{"type":"text","text":"answer"}]}}
+ *   {"type":"result","subtype":"success","result":"..."}
  */
 export class ClaudeLoop {
-  private opts: Required<ClaudeLoopOptions>;
-  private nodeSeq = 0;
+  private claudeCommand: string;
   private child: ChildProcess | null = null;
   private aborted = false;
+  private nodeSeq = 0;
 
-  constructor(opts: ClaudeLoopOptions) {
-    this.opts = {
-      ...opts,
-      claudeCommand: opts.claudeCommand || process.env.AGENT_COMMAND || "claude",
-    };
+  // Mutable state for building the DAG
+  private currentThinkNodeId: string | null = null;
+  private currentThinkText = "";
+  private lastParentNodeId: string | null = null;
+  private finalText = "";
+
+  constructor(private opts: ClaudeLoopOptions) {
+    this.claudeCommand = opts.claudeCommand || process.env.AGENT_COMMAND || "claude";
   }
 
   async run(): Promise<void> {
     const { emit, prompt } = this.opts;
 
-    emit({ type: "run_started" });
-
-    const thinkNodeId = this.nextNodeId();
-    emit({
-      type: "node_created",
-      nodeId: thinkNodeId,
-      role: "thinking",
-      content: `Calling Claude Code CLI...`,
-      status: "streaming",
-    });
+    emit({ type: "run_started", provider: "claude" });
 
     try {
-      await this.spawnClaude(prompt, thinkNodeId);
+      await this.spawnClaude(prompt);
 
-      if (!this.aborted) {
-        emit({ type: "run_finished", status: "success" });
+      if (this.aborted) {
+        emit({ type: "run_finished", status: "aborted" });
+        return;
       }
+
+      // Finalize last thinking node if still open
+      this.finalizeThinkingNode();
+
+      // Create answer node and HITL checkpoint
+      const answerText = this.finalText || "(empty response)";
+      await this.answerCheckpointLoop(answerText);
+
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const errNodeId = this.nextNodeId();
@@ -75,6 +72,94 @@ export class ClaudeLoop {
     }
   }
 
+  /**
+   * HITL loop: show answer, wait for user decision, revise if needed.
+   */
+  private async answerCheckpointLoop(answerText: string): Promise<void> {
+    const { emit, hitl } = this.opts;
+    let currentAnswer = answerText;
+
+    while (true) {
+      const answerNodeId = this.nextNodeId();
+      emit({
+        type: "node_created",
+        nodeId: answerNodeId,
+        parentId: this.lastParentNodeId ?? undefined,
+        role: "answer",
+        content: currentAnswer,
+        status: "waiting_human",
+      });
+      if (this.lastParentNodeId) {
+        emit({ type: "edge_created", from: this.lastParentNodeId, to: answerNodeId, kind: "depends" });
+      }
+
+      const ctx: HitlContext = { kind: "answer_review", answer: currentAnswer };
+      const { checkpointId, promise } = hitl.awaitCheckpoint(ctx);
+      emit({
+        type: "hitl_required",
+        checkpointId,
+        nodeId: answerNodeId,
+        options: ["accept", "revise", "finish"],
+        context: ctx,
+      });
+
+      const decision = await promise;
+      emit({
+        type: "hitl_applied",
+        checkpointId,
+        decision: decision.decision,
+        note: decision.note,
+      });
+
+      if (decision.decision === "accept" || decision.decision === "finish") {
+        emit({ type: "node_updated", nodeId: answerNodeId, patch: { status: "done" } });
+        emit({ type: "run_finished", status: "success" });
+        return;
+      }
+
+      if (decision.decision === "revise") {
+        const feedback = decision.note || "Please improve your answer.";
+        emit({
+          type: "node_updated",
+          nodeId: answerNodeId,
+          patch: { content: `${currentAnswer}\n\n[Revision requested: ${feedback}]`, status: "done" },
+        });
+
+        // Spawn new Claude CLI with revision prompt
+        this.lastParentNodeId = answerNodeId;
+        const revisePrompt = `Previous answer:\n${currentAnswer}\n\nUser feedback:\n${feedback}\n\nPlease revise your answer based on the feedback above.`;
+
+        this.currentThinkNodeId = null;
+        this.currentThinkText = "";
+        this.finalText = "";
+
+        try {
+          await this.spawnClaude(revisePrompt);
+          this.finalizeThinkingNode();
+          currentAnswer = this.finalText || "(empty response)";
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          emit({
+            type: "node_created",
+            nodeId: this.nextNodeId(),
+            role: "error",
+            content: `Revision failed: ${msg}`,
+            status: "error",
+          });
+          emit({ type: "run_finished", status: "failed" });
+          return;
+        }
+        // Loop back to show new answer + checkpoint
+        continue;
+      }
+
+      // Unknown decision — treat as accept
+      emit({ type: "node_updated", nodeId: answerNodeId, patch: { status: "done" } });
+      emit({ type: "run_finished", status: "success" });
+      return;
+    }
+  }
+
   abort() {
     this.aborted = true;
     if (this.child && !this.child.killed) {
@@ -82,18 +167,19 @@ export class ClaudeLoop {
     }
   }
 
-  private spawnClaude(prompt: string, thinkNodeId: string): Promise<void> {
+  private spawnClaude(prompt: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      const { emit, claudeCommand } = this.opts;
+      const { emit } = this.opts;
 
       const args = [
         "-p",
         "--verbose",
         "--output-format", "stream-json",
+        "--include-partial-messages",
         prompt,
       ];
 
-      this.child = spawn(claudeCommand, args, {
+      this.child = spawn(this.claudeCommand, args, {
         shell: true,
         env: process.env,
         windowsHide: true,
@@ -101,11 +187,6 @@ export class ClaudeLoop {
 
       let stdoutBuf = "";
       let stderrBuf = "";
-      let fullText = "";
-      let currentToolNodeId: string | null = null;
-      let currentToolName = "";
-      let currentToolArgsStr = "";
-      let lastParentNodeId = thinkNodeId;
 
       const handleLine = (line: string) => {
         const trimmed = line.trim();
@@ -118,181 +199,24 @@ export class ClaudeLoop {
           return;
         }
 
-        // Handle stream_event (Claude API streaming events)
-        if (obj?.type === "stream_event") {
-          const evt = obj.event;
-          if (!evt) return;
+        // Skip system events (hooks, init)
+        if (obj?.type === "system") return;
 
-          // Text delta — append to thinking node
-          if (
-            evt.type === "content_block_delta" &&
-            evt.delta?.type === "text_delta" &&
-            typeof evt.delta.text === "string"
-          ) {
-            fullText += evt.delta.text;
-            emit({
-              type: "node_updated",
-              nodeId: thinkNodeId,
-              patch: { content: fullText, status: "streaming" },
-            });
-            return;
+        // Handle assistant messages
+        if (obj?.type === "assistant") {
+          const content = obj.message?.content;
+          if (!Array.isArray(content)) return;
+
+          for (const block of content) {
+            this.handleContentBlock(block);
           }
-
-          // Tool use start — create tool_call node
-          if (
-            evt.type === "content_block_start" &&
-            evt.content_block?.type === "tool_use"
-          ) {
-            // Finalize thinking node if we have text
-            if (fullText.length > 0) {
-              emit({
-                type: "node_updated",
-                nodeId: thinkNodeId,
-                patch: { content: fullText, status: "done" },
-              });
-            }
-
-            currentToolName = evt.content_block.name || "unknown_tool";
-            currentToolArgsStr = "";
-            currentToolNodeId = this.nextNodeId();
-
-            emit({
-              type: "node_created",
-              nodeId: currentToolNodeId,
-              parentId: lastParentNodeId,
-              role: "tool_call",
-              content: `${currentToolName}(...)`,
-              status: "streaming",
-              toolName: currentToolName,
-            });
-            emit({
-              type: "edge_created",
-              from: lastParentNodeId,
-              to: currentToolNodeId,
-              kind: "tool",
-            });
-            return;
-          }
-
-          // Tool use input delta — accumulate JSON arguments
-          if (
-            evt.type === "content_block_delta" &&
-            evt.delta?.type === "input_json_delta" &&
-            typeof evt.delta.partial_json === "string" &&
-            currentToolNodeId
-          ) {
-            currentToolArgsStr += evt.delta.partial_json;
-            emit({
-              type: "node_updated",
-              nodeId: currentToolNodeId,
-              patch: { content: `${currentToolName}(${currentToolArgsStr})` },
-            });
-            return;
-          }
-
-          // Content block stop — finalize tool_call node
-          if (evt.type === "content_block_stop" && currentToolNodeId) {
-            let toolArgs: Record<string, unknown> = {};
-            try {
-              toolArgs = JSON.parse(currentToolArgsStr || "{}");
-            } catch { /* keep empty */ }
-
-            emit({
-              type: "node_updated",
-              nodeId: currentToolNodeId,
-              patch: {
-                content: `${currentToolName}(${JSON.stringify(toolArgs)})`,
-                status: "done",
-              },
-            });
-
-            lastParentNodeId = currentToolNodeId;
-            currentToolNodeId = null;
-            currentToolName = "";
-            currentToolArgsStr = "";
-            return;
-          }
-
           return;
         }
 
-        // Handle tool_use events from --verbose mode
-        if (obj?.type === "tool_use") {
-          const toolNodeId = this.nextNodeId();
-          const toolName = obj.tool || "unknown";
-          const toolArgs = obj.input || {};
-
-          emit({
-            type: "node_created",
-            nodeId: toolNodeId,
-            parentId: lastParentNodeId,
-            role: "tool_call",
-            content: `${toolName}(${JSON.stringify(toolArgs)})`,
-            status: "done",
-            toolName,
-            toolArgs,
-          });
-          emit({
-            type: "edge_created",
-            from: lastParentNodeId,
-            to: toolNodeId,
-            kind: "tool",
-          });
-          lastParentNodeId = toolNodeId;
-          return;
-        }
-
-        // Handle tool_result events from --verbose mode
-        if (obj?.type === "tool_result") {
-          const resultNodeId = this.nextNodeId();
-          const toolName = obj.tool || "unknown";
-          const content = typeof obj.content === "string"
-            ? obj.content
-            : JSON.stringify(obj.content || "");
-
-          emit({
-            type: "node_created",
-            nodeId: resultNodeId,
-            parentId: lastParentNodeId,
-            role: "tool_result",
-            content: content.length > 2000 ? content.slice(0, 2000) + "\n...(truncated)" : content,
-            status: "done",
-            toolName,
-          });
-          emit({
-            type: "edge_created",
-            from: lastParentNodeId,
-            to: resultNodeId,
-            kind: "depends",
-          });
-          lastParentNodeId = resultNodeId;
-
-          // Start new thinking node for next round
-          const newThinkId = this.nextNodeId();
-          thinkNodeId = newThinkId;
-          fullText = "";
-          emit({
-            type: "node_created",
-            nodeId: newThinkId,
-            parentId: resultNodeId,
-            role: "thinking",
-            content: "Thinking...",
-            status: "streaming",
-          });
-          emit({
-            type: "edge_created",
-            from: resultNodeId,
-            to: newThinkId,
-            kind: "depends",
-          });
-          lastParentNodeId = newThinkId;
-          return;
-        }
-
-        // Handle final result
-        if (obj?.type === "result" && typeof obj.result === "string") {
-          if (fullText.length === 0) {
-            fullText = obj.result;
+        // Handle final result — capture text for answer node
+        if (obj?.type === "result") {
+          if (typeof obj.result === "string" && obj.result.length > 0) {
+            this.finalText = obj.result;
           }
           return;
         }
@@ -313,41 +237,13 @@ export class ClaudeLoop {
       });
 
       this.child.on("error", (err) => {
-        reject(new Error(`Failed to start '${claudeCommand}': ${err.message}`));
+        reject(new Error(`Failed to start '${this.claudeCommand}': ${err.message}`));
       });
 
       this.child.on("close", (code) => {
-        // Process remaining buffer
         if (stdoutBuf.trim()) handleLine(stdoutBuf);
 
-        // Finalize the last thinking node
-        if (fullText.length > 0) {
-          emit({
-            type: "node_updated",
-            nodeId: thinkNodeId,
-            patch: { content: fullText, status: "done" },
-          });
-
-          // Create answer node
-          const answerNodeId = this.nextNodeId();
-          emit({
-            type: "node_created",
-            nodeId: answerNodeId,
-            parentId: thinkNodeId,
-            role: "answer",
-            content: fullText,
-            status: "done",
-          });
-          emit({
-            type: "edge_created",
-            from: thinkNodeId,
-            to: answerNodeId,
-            kind: "depends",
-          });
-        }
-
         if (this.aborted) {
-          emit({ type: "run_finished", status: "aborted" });
           resolve();
           return;
         }
@@ -360,7 +256,7 @@ export class ClaudeLoop {
         }
       });
 
-      // Wire up abort via hitl interrupt
+      // Poll for abort interrupts
       const checkAbort = setInterval(() => {
         const interrupts = this.opts.hitl.drainInterrupts();
         for (const intr of interrupts) {
@@ -369,9 +265,100 @@ export class ClaudeLoop {
           }
         }
       }, 500);
-
       this.child.on("close", () => clearInterval(checkAbort));
     });
+  }
+
+  private handleContentBlock(block: any): void {
+    const { emit } = this.opts;
+
+    // Thinking block
+    if (block.type === "thinking" && typeof block.thinking === "string") {
+      this.ensureThinkingNode();
+      this.currentThinkText += block.thinking;
+      emit({
+        type: "node_updated",
+        nodeId: this.currentThinkNodeId!,
+        patch: { content: this.currentThinkText, status: "streaming" },
+      });
+      return;
+    }
+
+    // Tool use block — CLI has already executed this tool
+    if (block.type === "tool_use") {
+      this.finalizeThinkingNode();
+
+      const toolNodeId = this.nextNodeId();
+      const toolName = block.name || "unknown_tool";
+      const toolArgs = block.input || {};
+
+      emit({
+        type: "node_created",
+        nodeId: toolNodeId,
+        parentId: this.lastParentNodeId ?? undefined,
+        role: "tool_call",
+        content: `${toolName}(${JSON.stringify(toolArgs)})`,
+        status: "done",
+        toolName,
+        toolArgs,
+      });
+      if (this.lastParentNodeId) {
+        emit({ type: "edge_created", from: this.lastParentNodeId, to: toolNodeId, kind: "tool" });
+      }
+
+      this.lastParentNodeId = toolNodeId;
+      return;
+    }
+
+    // Text block — update current thinking node
+    if (block.type === "text" && typeof block.text === "string") {
+      this.ensureThinkingNode();
+      this.currentThinkText += block.text;
+      this.finalText = this.currentThinkText; // Keep as candidate for final answer
+      emit({
+        type: "node_updated",
+        nodeId: this.currentThinkNodeId!,
+        patch: { content: this.currentThinkText, status: "streaming" },
+      });
+      return;
+    }
+  }
+
+  private ensureThinkingNode(): void {
+    if (this.currentThinkNodeId) return;
+
+    const nodeId = this.nextNodeId();
+    this.currentThinkNodeId = nodeId;
+    this.currentThinkText = "";
+
+    this.opts.emit({
+      type: "node_created",
+      nodeId,
+      parentId: this.lastParentNodeId ?? undefined,
+      role: "thinking",
+      content: "Thinking...",
+      status: "streaming",
+    });
+    if (this.lastParentNodeId) {
+      this.opts.emit({ type: "edge_created", from: this.lastParentNodeId, to: nodeId, kind: "depends" });
+    }
+
+    this.lastParentNodeId = nodeId;
+  }
+
+  private finalizeThinkingNode(): void {
+    if (!this.currentThinkNodeId) return;
+
+    this.opts.emit({
+      type: "node_updated",
+      nodeId: this.currentThinkNodeId,
+      patch: {
+        content: this.currentThinkText || "(empty)",
+        status: "done",
+      },
+    });
+
+    this.currentThinkNodeId = null;
   }
 
   private nextNodeId(): string {

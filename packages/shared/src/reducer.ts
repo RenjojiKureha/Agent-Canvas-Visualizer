@@ -17,7 +17,7 @@ export function applyEvent(state: GraphState, event: AgentEvent): GraphState {
 
   switch (event.type) {
     case "run_started":
-      return { ...base, runStatus: "streaming" };
+      return { ...base, runStatus: "streaming", provider: event.provider };
 
     case "node_created": {
       const newNodes = { ...base.nodes };

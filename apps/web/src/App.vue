@@ -12,6 +12,8 @@ const error = ref("");
 const isRunning = computed(() => store.isRunning);
 const checkpoint = computed(() => store.currentCheckpoint);
 const stepInfo = computed(() => store.stepInfo);
+const provider = computed(() => store.graph.provider);
+const isApiMode = computed(() => provider.value === "api" || !provider.value);
 
 async function start() {
   if (loading.value) return;
@@ -76,7 +78,8 @@ async function onHitlDecide(decision: string, note?: string, modifications?: Rec
       <div class="meta">
         <span>runId: {{ store.graph.runId || "-" }}</span>
         <span>status: {{ store.graph.runStatus }}{{ isRunning ? " ..." : "" }}</span>
-        <span>step: {{ stepInfo.current }}/{{ stepInfo.max || "?" }}</span>
+        <span v-if="isApiMode">step: {{ stepInfo.current }}/{{ stepInfo.max || "?" }}</span>
+        <span>provider: {{ provider || "-" }}</span>
         <span>lastSeq: {{ store.graph.lastSeq }}</span>
       </div>
       <DagCanvas :nodes="store.nodes" :edges="store.graph.edges" />

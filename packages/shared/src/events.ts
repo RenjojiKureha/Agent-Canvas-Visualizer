@@ -14,7 +14,7 @@ export interface ToolResultData {
 }
 
 export type AgentEvent =
-  | (BaseEvent & { type: "run_started" })
+  | (BaseEvent & { type: "run_started"; provider?: "api" | "claude" })
   | (BaseEvent & {
       type: "node_created";
       nodeId: string;
@@ -94,6 +94,7 @@ export type RunStatus = "idle" | "streaming" | "waiting_human" | "resumed" | "fi
 export interface GraphState {
   runId?: string;
   runStatus: RunStatus;
+  provider?: "api" | "claude";
   nodes: Record<string, GraphNode>;
   edges: GraphEdge[];
   checkpoints: Record<string, {
