@@ -125,7 +125,7 @@ export class RunManager {
     for (const event of history) this.writeSse(res, event);
 
     const hb = setInterval(() => {
-      res.write(`:heartbeat ${Date.now()}\n\n`);
+      res.write(`event: heartbeat\ndata: ${Date.now()}\n\n`);
     }, 15000);
     res.on("close", () => clearInterval(hb));
   }

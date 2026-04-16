@@ -1,13 +1,17 @@
 import { defineStore } from "pinia";
 import { computed, ref, watch } from "vue";
 import { applyEvent, createInitialGraphState, type AgentEvent } from "@acv/shared";
-import { connectRunStream, startRunRequest, interveneRequest, interruptRequest } from "../services/sse";
+import { connectRunStream, startRunRequest, interveneRequest, interruptRequest, type RunStreamHandle } from "../services/sse";
+
+const STORAGE_KEY = "acv_activeRunId";
 
 export const useAgentRunStore = defineStore("agent-run", () => {
   const graph = ref(createInitialGraphState());
   const queue = ref<AgentEvent[]>([]);
+  /** True when the SSE connection is open but no events have arrived recently */
+  const stale = ref(false);
   let raf = 0;
-  let currentSource: EventSource | null = null;
+  let currentHandle: RunStreamHandle | null = null;
   let activeRunId: string | null = null;
 
   const nodes = computed(() => Object.values(graph.value.nodes));
@@ -44,6 +48,8 @@ export const useAgentRunStore = defineStore("agent-run", () => {
     }
     const batch = queue.value.splice(0, queue.value.length);
     for (const event of batch) graph.value = applyEvent(graph.value, event);
+    // Any real event means connection is alive — clear stale flag
+    stale.value = false;
     raf = requestAnimationFrame(flush);
   }
 
@@ -59,9 +65,39 @@ export const useAgentRunStore = defineStore("agent-run", () => {
       cancelAnimationFrame(raf);
       raf = 0;
     }
-    if (currentSource) {
-      currentSource.close();
-      currentSource = null;
+    if (currentHandle) {
+      currentHandle.cleanup();
+      currentHandle.source.close();
+      currentHandle = null;
+    }
+    stale.value = false;
+  }
+
+  function openStream(runId: string) {
+    currentHandle = connectRunStream(
+      runId,
+      enqueue,
+      () => {
+        graph.value = { ...graph.value, runStatus: "error" };
+        sessionStorage.removeItem(STORAGE_KEY);
+      },
+      () => {
+        if (isRunning.value) stale.value = true;
+      },
+    );
+  }
+
+  function reconnect(runId: string) {
+    closeStream();
+    graph.value = createInitialGraphState();
+    activeRunId = runId;
+    openStream(runId);
+  }
+
+  function init() {
+    const savedRunId = sessionStorage.getItem(STORAGE_KEY);
+    if (savedRunId && !activeRunId) {
+      reconnect(savedRunId);
     }
   }
 
@@ -70,6 +106,7 @@ export const useAgentRunStore = defineStore("agent-run", () => {
     (status) => {
       if (status === "finished" || status === "error") {
         closeStream();
+        sessionStorage.removeItem(STORAGE_KEY);
       }
     },
   );
@@ -79,10 +116,8 @@ export const useAgentRunStore = defineStore("agent-run", () => {
     graph.value = createInitialGraphState();
     const runId = await startRunRequest(prompt, projectPath);
     activeRunId = runId;
-    currentSource = connectRunStream(runId, enqueue, () => {
-      // SSE gave up reconnecting — mark run as errored
-      graph.value = { ...graph.value, runStatus: "error" };
-    });
+    sessionStorage.setItem(STORAGE_KEY, runId);
+    openStream(runId);
   }
 
   async function intervene(
@@ -108,7 +143,10 @@ export const useAgentRunStore = defineStore("agent-run", () => {
     resolvedCheckpoints,
     stepInfo,
     isRunning,
+    stale,
     startRun,
+    init,
+    reconnect,
     intervene,
     interrupt,
     closeStream,

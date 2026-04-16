@@ -8,6 +8,8 @@
   --line: #d1d9e6;
   --accent: #0f766e;
   --warn: #d97706;
+  --sidebar-w: 320px;
+  --header-h: 56px;
 }
 
 * { box-sizing: border-box; }
@@ -15,40 +17,95 @@ body {
   margin: 0;
   background: radial-gradient(circle at 10% 10%, #e5f2ff 0, transparent 36%), var(--bg);
   color: var(--text);
+  overflow: hidden;
+  height: 100vh;
 }
 
-.page {
-  max-width: 1800px;
-  margin: 0 auto;
-  padding: 24px;
+#app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
 
+/* ── Top header bar ── */
 .header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
+  padding: 10px 20px;
+  height: var(--header-h);
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
 }
 
 h1 {
   margin: 0;
-  font-size: 24px;
+  font-size: 18px;
+  white-space: nowrap;
 }
 
 .btn-group {
   display: flex;
   gap: 8px;
   align-items: center;
-  flex-wrap: wrap;
 }
 
+/* ── Two-column body ── */
+.app-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ── Left sidebar ── */
+.sidebar {
+  width: var(--sidebar-w);
+  flex-shrink: 0;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.sidebar-section {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.sidebar-section:last-child {
+  border-bottom: none;
+}
+
+/* ── Main canvas area ── */
+.canvas-area {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Status bar above canvas ── */
+.canvas-status {
+  flex-shrink: 0;
+  padding: 6px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  background: #fafbfd;
+}
+
+/* ── Common styles ── */
 button {
   border: 0;
   background: var(--accent);
   color: white;
-  padding: 10px 14px;
+  padding: 8px 14px;
   border-radius: 8px;
   cursor: pointer;
   font-size: 13px;
@@ -74,6 +131,10 @@ button:disabled {
   cursor: not-allowed;
 }
 
+button.danger {
+  background: #dc2626;
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -83,20 +144,23 @@ button:disabled {
 
 .meta {
   display: flex;
-  gap: 12px;
-  font-size: 13px;
+  gap: 10px;
+  font-size: 12px;
   color: var(--muted);
-  margin-bottom: 10px;
   flex-wrap: wrap;
+  align-items: center;
+}
+
+.meta span {
+  white-space: nowrap;
 }
 
 .error-bar {
   background: #fef2f2;
   border: 1px solid #fca5a5;
   color: #dc2626;
-  padding: 10px 14px;
+  padding: 8px 14px;
   border-radius: 8px;
-  margin-bottom: 12px;
   font-size: 13px;
 }
 
@@ -108,17 +172,20 @@ textarea {
 }
 
 .field-label {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--muted);
-  margin-bottom: 6px;
+  margin-bottom: 4px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 .field-input {
   width: 100%;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 10px;
-  font-size: 14px;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
   color: var(--text);
   background: var(--panel);
   resize: vertical;
@@ -128,16 +195,12 @@ textarea {
   font-family: monospace;
 }
 
-button.danger {
-  background: #dc2626;
-}
-
+/* ── Status banners ── */
 .status-banner {
-  padding: 8px 14px;
-  border-radius: 8px;
-  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
   font-weight: 600;
-  margin-bottom: 10px;
   text-align: center;
 }
 
@@ -152,6 +215,7 @@ button.danger {
   background: #fffbeb;
   border: 1px solid #fcd34d;
   color: #b45309;
+  animation: pulse-bg 1s ease-in-out infinite;
 }
 
 .status-finished {
@@ -166,32 +230,126 @@ button.danger {
   color: #dc2626;
 }
 
+.status-stale {
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  color: #c2410c;
+  animation: pulse-bg 2s ease-in-out infinite;
+}
+
 @keyframes pulse-bg {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.7; }
 }
 
-/* Responsive: stack header on narrow screens */
-@media (max-width: 768px) {
-  .page {
-    padding: 12px;
+/* ── HITL floating overlay ── */
+.hitl-overlay {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  width: min(560px, calc(100% - 40px));
+  box-shadow: 0 -4px 32px rgba(0,0,0,0.15), 0 0 0 1px rgba(249, 115, 22, 0.3);
+  border-radius: 12px;
+  animation: hitl-slide-up 0.35s ease-out;
+}
+
+@keyframes hitl-slide-up {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+/* Pulse ring around HITL to draw attention */
+.hitl-overlay::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 14px;
+  border: 2px solid #f97316;
+  animation: hitl-ring 2s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes hitl-ring {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+/* ── Zoom controls ── */
+.zoom-controls {
+  position: absolute;
+  bottom: 16px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 10;
+}
+
+.zoom-controls button {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 16px;
+  font-weight: bold;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
+
+.zoom-controls button:hover:not(:disabled) {
+  background: #f3f4f6;
+  opacity: 1;
+}
+
+.zoom-controls .zoom-label {
+  font-size: 10px;
+  color: var(--muted);
+  text-align: center;
+  padding: 2px 0;
+  user-select: none;
+}
+
+/* ── Responsive: collapse sidebar on narrow screens ── */
+@media (max-width: 860px) {
+  .app-body {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    max-height: 200px;
   }
 
   .header {
-    flex-direction: column;
-    align-items: flex-start;
+    padding: 8px 12px;
   }
 
   h1 {
-    font-size: 20px;
-  }
-
-  .btn-group {
-    width: 100%;
+    font-size: 16px;
   }
 
   button {
-    padding: 8px 10px;
+    padding: 6px 10px;
     font-size: 12px;
+  }
+
+  .hitl-overlay {
+    bottom: 10px;
+    width: calc(100% - 20px);
   }
 }

@@ -1,15 +1,17 @@
 <script setup lang="ts">
-import { computed, ref, onUnmounted } from "vue";
+import { computed, ref, onMounted, onUnmounted } from "vue";
 import DagCanvas from "./components/DagCanvas.vue";
 import HitlPanel from "./components/HitlPanel.vue";
 import { useAgentRunStore } from "./stores/agentRun";
 
 const store = useAgentRunStore();
+onMounted(() => store.init());
 onUnmounted(() => store.closeStream());
 const prompt = ref("Please analyze this project structure and suggest improvements.");
 const projectPath = ref("");
 const loading = ref(false);
 const error = ref("");
+const reconnecting = ref(false);
 
 const isRunning = computed(() => store.isRunning);
 const checkpoint = computed(() => store.currentCheckpoint);
@@ -17,8 +19,12 @@ const stepInfo = computed(() => store.stepInfo);
 const provider = computed(() => store.graph.provider);
 const isApiMode = computed(() => provider.value === "api" || !provider.value);
 const runStatus = computed(() => store.graph.runStatus);
+const isStale = computed(() => store.stale);
 
 const statusBanner = computed(() => {
+  if (isStale.value && (runStatus.value === "streaming" || runStatus.value === "resumed")) {
+    return { text: "Connection may be lost — no updates received for a while", cls: "status-stale" };
+  }
   switch (runStatus.value) {
     case "streaming":
     case "resumed":
@@ -66,64 +72,116 @@ async function onHitlDecide(decision: string, note?: string, modifications?: Rec
     error.value = e instanceof Error ? e.message : String(e);
   }
 }
+
+function tryReconnect() {
+  if (reconnecting.value) return;
+  const runId = store.graph.runId;
+  if (!runId) return;
+  reconnecting.value = true;
+  store.reconnect(runId);
+  setTimeout(() => { reconnecting.value = false; }, 2000);
+}
 </script>
 
 <template>
-  <main class="page">
-    <section class="header">
-      <h1>Agent Canvas Visualizer</h1>
-      <div class="btn-group">
-        <button @click="start" :disabled="loading || isRunning">
-          {{ loading ? "Starting..." : "Start Agent Run" }}
+  <!-- Top header -->
+  <header class="header">
+    <h1>Agent Canvas Visualizer</h1>
+    <div class="btn-group">
+      <button @click="start" :disabled="loading || isRunning">
+        {{ loading ? "Starting..." : "Start Run" }}
+      </button>
+      <button class="danger" @click="abort" :disabled="!isRunning">
+        Abort
+      </button>
+    </div>
+  </header>
+
+  <!-- Two-column body -->
+  <div class="app-body">
+    <!-- Left sidebar: controls & meta -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="field-label">Project Path</div>
+        <input
+          v-model="projectPath"
+          type="text"
+          :disabled="isRunning"
+          placeholder="Leave empty for server's CWD"
+          class="field-input mono"
+        />
+      </div>
+
+      <div class="sidebar-section">
+        <div class="field-label">Prompt</div>
+        <textarea
+          v-model="prompt"
+          rows="5"
+          :disabled="isRunning"
+          class="field-input"
+        />
+      </div>
+
+      <div class="sidebar-section">
+        <div class="field-label">Run Info</div>
+        <div class="meta">
+          <span>run: {{ store.graph.runId?.slice(0, 8) || "-" }}</span>
+          <span v-if="isApiMode">step: {{ stepInfo.current }}/{{ stepInfo.max || "?" }}</span>
+          <span>{{ provider || "-" }}</span>
+          <span>seq: {{ store.graph.lastSeq }}</span>
+        </div>
+      </div>
+
+      <div v-if="error" class="sidebar-section">
+        <div class="error-bar">{{ error }}</div>
+      </div>
+    </aside>
+
+    <!-- Main canvas area -->
+    <main class="canvas-area">
+      <!-- Status bar -->
+      <div v-if="statusBanner" class="canvas-status">
+        <div :class="['status-banner', statusBanner.cls]" style="flex:1">
+          {{ statusBanner.text }}
+        </div>
+        <button
+          v-if="isStale"
+          class="secondary"
+          :disabled="reconnecting"
+          @click="tryReconnect"
+          style="flex-shrink:0"
+        >
+          {{ reconnecting ? "Reconnecting..." : "Reconnect" }}
         </button>
-        <button class="danger" @click="abort" :disabled="!isRunning">
-          Abort
-        </button>
       </div>
-    </section>
 
-    <div v-if="error" class="error-bar">{{ error }}</div>
-
-    <section class="panel" style="margin-bottom: 12px">
-      <div class="field-label">Project Path</div>
-      <input
-        v-model="projectPath"
-        type="text"
-        :disabled="isRunning"
-        placeholder="Leave empty for server's working directory"
-        class="field-input mono"
-      />
-    </section>
-
-    <section class="panel" style="margin-bottom: 12px">
-      <div class="field-label">Prompt</div>
-      <textarea
-        v-model="prompt"
-        rows="3"
-        :disabled="isRunning"
-        class="field-input"
-      />
-    </section>
-
-    <section class="panel" style="margin-bottom: 12px">
-      <div class="meta">
-        <span>runId: {{ store.graph.runId || "-" }}</span>
-        <span v-if="isApiMode">step: {{ stepInfo.current }}/{{ stepInfo.max || "?" }}</span>
-        <span>provider: {{ provider || "-" }}</span>
-        <span>lastSeq: {{ store.graph.lastSeq }}</span>
-      </div>
-      <div v-if="statusBanner" :class="['status-banner', statusBanner.cls]">
-        {{ statusBanner.text }}
-      </div>
+      <!-- DAG canvas fills remaining space -->
       <DagCanvas :nodes="store.nodes" :edges="store.graph.edges" :decisions="store.resolvedCheckpoints" />
-    </section>
 
-    <section v-if="checkpoint" style="margin-bottom: 12px">
-      <HitlPanel
-        :checkpoint-id="checkpoint.checkpointId"
-        :context="checkpoint.context"
-        @decide="onHitlDecide"
-      />
-    </section>
-  </main>
+      <!-- HITL panel: floating overlay anchored to canvas bottom-center -->
+      <transition name="hitl-fade">
+        <div v-if="checkpoint" class="hitl-overlay">
+          <HitlPanel
+            :checkpoint-id="checkpoint.checkpointId"
+            :context="checkpoint.context"
+            @decide="onHitlDecide"
+          />
+        </div>
+      </transition>
+    </main>
+  </div>
 </template>
+
+<style scoped>
+.hitl-fade-enter-active, .hitl-fade-leave-active {
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.hitl-fade-enter-from {
+  opacity: 0;
+  transform: translateX(-50%) translateY(20px);
+}
+.hitl-fade-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(20px);
+}
+</style>
