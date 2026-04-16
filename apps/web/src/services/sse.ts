@@ -49,8 +49,15 @@ export async function interruptRequest(
   if (!res.ok) throw new Error(await extractError(res, "Failed to interrupt"));
 }
 
-export function connectRunStream(runId: string, onEvent: (e: AgentEvent) => void) {
+export function connectRunStream(
+  runId: string,
+  onEvent: (e: AgentEvent) => void,
+  onError?: () => void,
+) {
   const source = new EventSource(`${API_BASE}/runs/${runId}/stream`);
+  let errorCount = 0;
+  const MAX_RETRIES = 5;
+
   const names: AgentEvent["type"][] = [
     "run_started",
     "node_created",
@@ -65,6 +72,7 @@ export function connectRunStream(runId: string, onEvent: (e: AgentEvent) => void
 
   names.forEach((name) => {
     source.addEventListener(name, (message) => {
+      errorCount = 0; // reset on successful event
       try {
         const parsed = JSON.parse((message as MessageEvent).data) as AgentEvent;
         onEvent(parsed);
@@ -75,7 +83,12 @@ export function connectRunStream(runId: string, onEvent: (e: AgentEvent) => void
   });
 
   source.onerror = () => {
-    // EventSource auto-reconnects
+    errorCount++;
+    if (errorCount >= MAX_RETRIES) {
+      source.close();
+      console.error(`[sse] Gave up reconnecting after ${MAX_RETRIES} errors`);
+      onError?.();
+    }
   };
 
   return source;

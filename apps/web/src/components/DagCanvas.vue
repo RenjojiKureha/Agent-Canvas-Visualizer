@@ -7,12 +7,15 @@ type LayoutNode = GraphNode & {
   y: number;
   width: number;
   height: number;
-  header: string;
+  badgeLabel: string;
+  badgeWidth: number;
+  statusLabel: string;
   lines: string[];
   truncated: boolean;
   totalLines: number;
   fillColor: string;
   statusColor: string;
+  isNew: boolean;
 };
 
 type LayoutEdge = GraphEdge & {
@@ -20,21 +23,28 @@ type LayoutEdge = GraphEdge & {
   y1: number;
   x2: number;
   y2: number;
+  isNew: boolean;
 };
 
-const PREVIEW_LINES = 6;
-const MAX_CHARS_PER_LINE = 44;
-const NODE_WIDTH = 360;
-const NODE_GAP_Y = 24;
-const BRANCH_GAP_X = 56;
+const PREVIEW_LINES = 8;
+const MAX_CHARS_PER_LINE = 52;
+const NODE_WIDTH = 420;
+const NODE_GAP_Y = 32;
+const BRANCH_GAP_X = 72;
+const HEADER_H = 42;
+const BOTTOM_PAD = 16;
+const EDGE_GAP = 8; // gap between arrow tip and node boundary
 
 const props = defineProps<{
   nodes: GraphNode[];
   edges: GraphEdge[];
+  decisions?: Record<string, { decision: string }>;
 }>();
 
 const selectedNodeId = ref<string | null>(null);
 const dagContainerRef = ref<HTMLElement | null>(null);
+const knownNodeIds = ref(new Set<string>());
+const knownEdgeIds = ref(new Set<string>());
 
 const selectedNode = computed(() => {
   if (!selectedNodeId.value) return null;
@@ -70,6 +80,13 @@ watch(
   },
 );
 
+function onNodeAnimated(id: string) {
+  knownNodeIds.value.add(id);
+}
+function onEdgeAnimated(id: string) {
+  knownEdgeIds.value.add(id);
+}
+
 function roleColor(role: GraphNode["role"]): string {
   switch (role) {
     case "thinking": return "#0f766e";
@@ -94,6 +111,14 @@ function roleLabel(role: GraphNode["role"]): string {
   }
 }
 
+function statusText(status: GraphNode["status"]): string {
+  switch (status) {
+    case "streaming": return "streaming...";
+    case "waiting_human": return "waiting";
+    default: return status;
+  }
+}
+
 function statusIndicator(status: GraphNode["status"]): string {
   switch (status) {
     case "streaming": return "#facc15";
@@ -111,15 +136,11 @@ function wrapLine(line: string, maxChars: number): string[] {
   return out;
 }
 
-function clamp(v: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, v));
-}
-
 function nodeHeight(n: GraphNode): number {
   const rawLines = (n.content || "").split(/\r?\n/);
   const allWrapped = rawLines.flatMap((l) => wrapLine(l, MAX_CHARS_PER_LINE));
   const lineCount = Math.min(allWrapped.length, PREVIEW_LINES + 1);
-  return 40 + Math.max(lineCount, 1) * 16 + 14;
+  return HEADER_H + Math.max(lineCount, 1) * 16 + BOTTOM_PAD;
 }
 
 const layout = computed(() => {
@@ -168,34 +189,33 @@ const layout = computed(() => {
 
   const nodes: LayoutNode[] = props.nodes.map((n) => {
     const pos = posMap.get(n.id) || { x: mainX, y: 24 };
-    const statusLabel = n.status === "streaming" ? "streaming..."
-      : n.status === "waiting_human" ? "waiting"
-      : n.status;
-    const header = `${roleLabel(n.role)} · ${statusLabel}`;
+    const badgeLabel = roleLabel(n.role);
+    const badgeWidth = badgeLabel.length * 7.2 + 20;
     const rawLines = (n.content || "").split(/\r?\n/);
     const allWrapped = rawLines.flatMap((l) => wrapLine(l, MAX_CHARS_PER_LINE));
     const totalLines = allWrapped.length;
     const truncated = allWrapped.length > PREVIEW_LINES;
     const lines = truncated
-      ? [...allWrapped.slice(0, PREVIEW_LINES), `... ${totalLines} lines total`]
+      ? [...allWrapped.slice(0, PREVIEW_LINES), `▼ ${totalLines} lines — click to expand`]
       : allWrapped;
 
-    const longest = Math.max(header.length, ...lines.map((l) => l.length), 12);
-    const width = clamp(26 + longest * 7.2, 200, NODE_WIDTH);
-    const height = 40 + Math.max(lines.length, 1) * 16 + 14;
+    const height = HEADER_H + Math.max(lines.length, 1) * 16 + BOTTOM_PAD;
 
     return {
       ...n,
       x: pos.x,
       y: pos.y,
-      width,
+      width: NODE_WIDTH,
       height,
-      header,
+      badgeLabel,
+      badgeWidth,
+      statusLabel: statusText(n.status),
       lines,
       truncated,
       totalLines,
       fillColor: roleColor(n.role),
       statusColor: statusIndicator(n.status),
+      isNew: !knownNodeIds.value.has(n.id),
     };
   });
 
@@ -206,21 +226,35 @@ const layout = computed(() => {
       const to = nodePos.get(e.to);
       if (!from || !to) return null;
       const isHorizontal = Math.abs(from.x - to.x) > NODE_WIDTH / 2;
+      const edgeId = `${e.from}->${e.to}:${e.kind}`;
       return {
         ...e,
-        x1: isHorizontal ? from.x + from.width : from.x + from.width / 2,
-        y1: isHorizontal ? from.y + from.height / 2 : from.y + from.height,
-        x2: isHorizontal ? to.x : to.x + to.width / 2,
-        y2: isHorizontal ? to.y + to.height / 2 : to.y,
+        id: edgeId,
+        // Offset endpoints away from node boundaries so arrows stay visible
+        x1: isHorizontal ? from.x + from.width + EDGE_GAP : from.x + from.width / 2,
+        y1: isHorizontal ? from.y + from.height / 2 : from.y + from.height + EDGE_GAP,
+        x2: isHorizontal ? to.x - EDGE_GAP : to.x + to.width / 2,
+        y2: isHorizontal ? to.y + to.height / 2 : to.y - EDGE_GAP,
+        isNew: !knownEdgeIds.value.has(edgeId),
       };
     })
     .filter((e): e is LayoutEdge => Boolean(e));
 
-  const svgWidth = Math.max(980, ...nodes.map((nd) => nd.x + nd.width + 40));
-  const svgHeight = Math.max(620, ...nodes.map((nd) => nd.y + nd.height + 40));
+  const svgWidth = Math.max(1100, ...nodes.map((nd) => nd.x + nd.width + 60));
+  const svgHeight = Math.max(620, ...nodes.map((nd) => nd.y + nd.height + 60));
 
   return { nodes, edges, svgWidth, svgHeight };
 });
+
+function edgeStyle(kind: GraphEdge["kind"]): { color: string; label: string; dash?: string } {
+  switch (kind) {
+    case "calls": return { color: "#3b82f6", label: "calls" };
+    case "tool":  return { color: "#7c3aed", label: "result" };
+    case "plan":  return { color: "#059669", label: "plan", dash: "6 3" };
+    case "depends": return { color: "#d97706", label: "dep", dash: "4 2" };
+    default: return { color: "#94a3b8", label: "" };
+  }
+}
 
 function edgePath(e: LayoutEdge): string {
   const dx = Math.abs(e.x2 - e.x1);
@@ -234,63 +268,165 @@ function edgePath(e: LayoutEdge): string {
     return `M ${e.x1} ${e.y1} C ${e.x1} ${e.y1 + cp}, ${e.x2} ${e.y2 - cp}, ${e.x2} ${e.y2}`;
   }
 }
+
+function nodeTooltip(n: LayoutNode): string {
+  const parts = [roleLabel(n.role)];
+  if (n.toolName) parts.push(`Tool: ${n.toolName}`);
+  parts.push(`Status: ${n.status}`);
+  if (n.content) {
+    const preview = n.content.slice(0, 200);
+    parts.push(`---\n${preview}${n.content.length > 200 ? "..." : ""}`);
+  }
+  return parts.join("\n");
+}
+
+function decisionColor(decision: string): string {
+  switch (decision) {
+    case "approve": return "#16a34a";
+    case "reject": return "#dc2626";
+    case "continue": return "#2563eb";
+    case "revise": return "#d97706";
+    case "finish": return "#374151";
+    case "retry": return "#059669";
+    case "abort": return "#dc2626";
+    default: return "#6b7280";
+  }
+}
+
+function decisionBadgeWidth(decision: string): number {
+  return decision.length * 6.5 + 16;
+}
 </script>
 
 <template>
   <div class="dag-wrapper">
-    <div ref="dagContainerRef" class="dag-container" :class="{ 'has-detail': selectedNode }">
-      <svg :width="layout.svgWidth" :height="layout.svgHeight" class="dag-svg">
+    <div ref="dagContainerRef" class="dag-container">
+      <div v-if="props.nodes.length === 0" class="dag-empty">
+        Start an agent run to see the execution graph here.
+      </div>
+      <svg v-else :width="layout.svgWidth" :height="layout.svgHeight" class="dag-svg">
         <defs>
+          <filter id="node-shadow" x="-6%" y="-6%" width="112%" height="120%">
+            <feDropShadow dx="0" dy="2" stdDeviation="4" flood-opacity="0.07" />
+          </filter>
+          <filter id="node-shadow-hover" x="-6%" y="-6%" width="112%" height="120%">
+            <feDropShadow dx="0" dy="4" stdDeviation="8" flood-opacity="0.12" />
+          </filter>
           <marker id="arrow" viewBox="0 0 10 6" refX="10" refY="3"
             markerWidth="8" markerHeight="6" orient="auto-start-reverse">
             <path d="M 0 0 L 10 3 L 0 6 z" fill="#94a3b8" />
           </marker>
+          <!-- One clipPath per node to prevent text overflow -->
+          <clipPath v-for="n in layout.nodes" :key="`clip-${n.id}`" :id="`clip-${n.id}`">
+            <rect x="0" y="0" rx="10" ry="10" :width="n.width" :height="n.height" />
+          </clipPath>
         </defs>
 
-        <g v-for="e in layout.edges" :key="e.id">
+        <!-- Edges (rendered first, below nodes) -->
+        <g v-for="e in layout.edges" :key="e.id"
+          class="dag-edge" :class="{ entering: e.isNew }"
+          @animationend="onEdgeAnimated(e.id)">
           <path :d="edgePath(e)"
-            fill="none" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)" />
+            fill="none" :stroke="edgeStyle(e.kind).color" stroke-width="1.5"
+            :stroke-dasharray="edgeStyle(e.kind).dash || 'none'"
+            marker-end="url(#arrow)" />
+          <text
+            :x="(e.x1 + e.x2) / 2"
+            :y="(e.y1 + e.y2) / 2 - 6"
+            :fill="edgeStyle(e.kind).color"
+            font-size="9" font-weight="600" text-anchor="middle"
+            opacity="0.7">
+            {{ edgeStyle(e.kind).label }}
+          </text>
         </g>
 
+        <!-- Nodes: outer <g> handles position, inner <g> handles animation -->
         <g v-for="n in layout.nodes" :key="n.id"
-          class="dag-node"
-          :class="{ selected: selectedNodeId === n.id, streaming: n.status === 'streaming' }"
-          @click="selectNode(n.id)">
+          :transform="`translate(${n.x}, ${n.y})`">
+          <title>{{ nodeTooltip(n) }}</title>
+          <g class="dag-node"
+            :class="{
+              selected: selectedNodeId === n.id,
+              streaming: n.status === 'streaming',
+              entering: n.isNew,
+            }"
+            :clip-path="`url(#clip-${n.id})`"
+            @click="selectNode(n.id)"
+            @animationend="onNodeAnimated(n.id)">
 
-          <rect :x="n.x" :y="n.y" rx="10" ry="10"
-            :width="n.width" :height="n.height"
-            :fill="n.fillColor" class="node-bg" />
+            <!-- Card background with shadow -->
+            <rect x="0" y="0" rx="10" ry="10"
+              :width="n.width" :height="n.height"
+              fill="#ffffff" stroke="#e5e7eb" stroke-width="1"
+              class="node-bg" filter="url(#node-shadow)" />
 
+            <!-- Left accent stripe -->
+            <rect x="0" y="8" width="4" :height="n.height - 16" rx="2"
+              :fill="n.fillColor" />
+
+            <!-- Role badge -->
+            <rect x="14" y="8" :width="n.badgeWidth" height="22" rx="11"
+              :fill="n.fillColor" />
+            <text :x="14 + n.badgeWidth / 2" y="23"
+              fill="white" font-size="11" font-weight="600"
+              text-anchor="middle">
+              {{ n.badgeLabel }}
+            </text>
+
+            <!-- Tool name (shown after badge for tool_call nodes) -->
+            <text v-if="n.toolName" :x="14 + n.badgeWidth + 8" y="23"
+              fill="#1d4ed8" font-size="11" font-weight="600"
+              font-family="'Cascadia Code', monospace">
+              {{ n.toolName }}
+            </text>
+
+            <!-- Status text (right-aligned near status dot) -->
+            <text :x="n.width - 32" y="23"
+              fill="#9ca3af" font-size="11" text-anchor="end">
+              {{ n.statusLabel }}
+            </text>
+
+            <!-- Status dot -->
+            <circle v-if="n.status === 'streaming'"
+              :cx="n.width - 16" cy="19" r="7"
+              fill="none" :stroke="n.statusColor" stroke-width="1.5"
+              class="pulse-ring" />
+            <circle :cx="n.width - 16" cy="19" r="4" :fill="n.statusColor" />
+
+            <!-- Divider -->
+            <line x1="14" :y1="HEADER_H - 6" :x2="n.width - 14" :y2="HEADER_H - 6"
+              stroke="#f0f0f0" stroke-width="1" />
+
+            <!-- HITL decision badge (for resolved checkpoints) -->
+            <g v-if="props.decisions?.[n.id]">
+              <rect :x="n.width - 32 - decisionBadgeWidth(props.decisions[n.id].decision) - 8" y="10" :width="decisionBadgeWidth(props.decisions[n.id].decision)" height="18" rx="9"
+                :fill="decisionColor(props.decisions[n.id].decision)" opacity="0.9" />
+              <text :x="n.width - 32 - decisionBadgeWidth(props.decisions[n.id].decision) / 2 - 8" y="22"
+                fill="white" font-size="9" font-weight="600" text-anchor="middle">
+                {{ props.decisions[n.id].decision.toUpperCase() }}
+              </text>
+            </g>
+
+            <!-- Content lines -->
+            <text
+              v-for="(line, idx) in n.lines"
+              :key="`${n.id}-${idx}`"
+              x="16"
+              :y="HEADER_H + 8 + idx * 16"
+              :fill="n.truncated && idx === n.lines.length - 1 ? '#9ca3af' : '#374151'"
+              :font-size="n.truncated && idx === n.lines.length - 1 ? '10.5' : '11.5'"
+              :font-style="n.truncated && idx === n.lines.length - 1 ? 'italic' : 'normal'"
+              font-family="'Cascadia Code', 'Fira Code', 'Consolas', monospace"
+            >
+              {{ line }}
+            </text>
+          </g>
+
+          <!-- Selection highlight (outside clip so border is visible) -->
           <rect v-if="selectedNodeId === n.id"
-            :x="n.x - 2" :y="n.y - 2" rx="12" ry="12"
+            x="-2" y="-2" rx="12" ry="12"
             :width="n.width + 4" :height="n.height + 4"
-            fill="none" stroke="#facc15" stroke-width="2.5" />
-
-          <circle v-if="n.status === 'streaming'"
-            :cx="n.x + n.width - 14" :cy="n.y + 16" r="8"
-            fill="none" :stroke="n.statusColor" stroke-width="1.5"
-            class="pulse-ring" />
-
-          <circle :cx="n.x + n.width - 14" :cy="n.y + 16" r="5" :fill="n.statusColor" />
-
-          <text :x="n.x + 12" :y="n.y + 20" fill="white" font-size="12" font-weight="600">
-            {{ n.header }}
-          </text>
-
-          <line :x1="n.x + 8" :y1="n.y + 28" :x2="n.x + n.width - 8" :y2="n.y + 28"
-            stroke="rgba(255,255,255,0.25)" stroke-width="1" />
-
-          <text
-            v-for="(line, idx) in n.lines"
-            :key="`${n.id}-${idx}`"
-            :x="n.x + 12"
-            :y="n.y + 44 + idx * 16"
-            :fill="n.truncated && idx === n.lines.length - 1 ? 'rgba(250,204,21,0.9)' : 'rgba(255,255,255,0.92)'"
-            :font-size="n.truncated && idx === n.lines.length - 1 ? '10.5' : '11.5'"
-            :font-style="n.truncated && idx === n.lines.length - 1 ? 'italic' : 'normal'"
-          >
-            {{ line }}
-          </text>
+            fill="none" stroke="#3b82f6" stroke-width="2" />
         </g>
       </svg>
     </div>
@@ -323,24 +459,59 @@ function edgePath(e: LayoutEdge): string {
 </template>
 
 <style scoped>
-.dag-wrapper { display: flex; gap: 12px; width: 100%; }
-.dag-container { flex: 1; overflow: auto; max-height: 70vh; min-width: 0; transition: flex 0.2s; }
-.dag-container.has-detail { flex: 3; }
-.dag-svg { border: 1px solid #d1d9e6; border-radius: 10px; background: #fbfdff; }
-.dag-node { cursor: pointer; }
-.dag-node .node-bg { opacity: 0.92; transition: opacity 0.15s; }
-.dag-node:hover .node-bg { opacity: 1; }
+/* Fix 3: min-width:0 + overflow:hidden prevents flex child from pushing wrapper wider */
+.dag-wrapper { display: block; width: 100%; min-width: 0; overflow: hidden; position: relative; }
+.dag-container { overflow: auto; max-height: calc(100vh - 300px); min-width: 0; }
+.dag-svg { border: 1px solid #e5e7eb; border-radius: 10px; background: #f8fafc; }
 
+/* Node card */
+.dag-node { cursor: pointer; }
+.dag-node .node-bg { transition: filter 0.2s, stroke 0.2s; }
+.dag-node:hover .node-bg { filter: url(#node-shadow-hover); stroke: #d1d5db; }
+
+/*
+ * Fix 1: Animation is on the INNER <g> (no SVG transform attribute),
+ * so CSS transform doesn't conflict with the outer <g>'s SVG translate.
+ */
+@keyframes node-enter {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.dag-node.entering {
+  animation: node-enter 0.35s ease-out both;
+}
+
+/* Edge entrance animation */
+@keyframes edge-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.dag-edge.entering {
+  animation: edge-enter 0.3s ease-out 0.1s both;
+}
+
+/* Streaming pulse ring */
 @keyframes pulse {
-  0% { opacity: 1; r: 5; }
-  100% { opacity: 0; r: 12; }
+  0% { opacity: 1; r: 4; }
+  100% { opacity: 0; r: 11; }
 }
 .pulse-ring { animation: pulse 1.2s ease-out infinite; }
 
+/* Detail panel — fixed overlay drawer */
 .detail-panel {
-  flex: 2; max-height: 70vh; display: flex; flex-direction: column;
+  position: fixed; top: 80px; right: 24px; bottom: 24px; width: 440px;
+  max-width: calc(100vw - 48px);
+  display: flex; flex-direction: column;
   background: #fff; border: 1px solid #d1d9e6; border-radius: 10px;
-  overflow: hidden; min-width: 280px;
+  overflow: hidden; box-shadow: -4px 0 24px rgba(0,0,0,0.08); z-index: 10;
 }
 .detail-header {
   display: flex; justify-content: space-between; align-items: center;
@@ -366,6 +537,11 @@ function edgePath(e: LayoutEdge): string {
 }
 .detail-section { margin-top: 12px; padding-top: 12px; border-top: 1px solid #e5e7eb; }
 .detail-section-title { font-size: 12px; color: #6b7280; margin-bottom: 4px; font-weight: 600; }
-.slide-enter-active, .slide-leave-active { transition: all 0.2s ease; }
-.slide-enter-from, .slide-leave-to { opacity: 0; transform: translateX(20px); }
+.slide-enter-active, .slide-leave-active { transition: transform 0.25s ease, opacity 0.25s ease; }
+.slide-enter-from, .slide-leave-to { opacity: 0; transform: translateX(100%); }
+.dag-empty {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 200px; color: #9ca3af; font-size: 14px;
+  border: 1px dashed #d1d9e6; border-radius: 10px; background: #f8fafc;
+}
 </style>

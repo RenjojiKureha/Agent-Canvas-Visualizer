@@ -18,7 +18,7 @@ body {
 }
 
 .page {
-  max-width: 1440px;
+  max-width: 1800px;
   margin: 0 auto;
   padding: 24px;
 }
@@ -58,6 +58,11 @@ button {
 
 button:hover:not(:disabled) {
   opacity: 0.85;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 button.secondary {
@@ -100,6 +105,27 @@ textarea {
   font-size: 14px;
   color: var(--text);
   background: var(--panel);
+}
+
+.field-label {
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.field-input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--panel);
+  resize: vertical;
+}
+
+.field-input.mono {
+  font-family: monospace;
 }
 
 button.danger {

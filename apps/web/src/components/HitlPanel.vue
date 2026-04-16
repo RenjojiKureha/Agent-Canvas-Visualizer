@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import type { HitlContext } from "@acv/shared";
 import ToolCallCard from "./ToolCallCard.vue";
 
@@ -14,6 +14,15 @@ const emit = defineEmits<{
 
 const note = ref("");
 const modifiedArgs = ref<Record<string, unknown>>({});
+
+// Reset state when checkpoint changes
+watch(
+  () => props.checkpointId,
+  () => {
+    note.value = "";
+    modifiedArgs.value = {};
+  },
+);
 
 const kind = computed(() => props.context?.kind || "answer_review");
 

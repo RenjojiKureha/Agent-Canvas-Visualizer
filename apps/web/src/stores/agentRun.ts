@@ -27,6 +27,16 @@ export const useAgentRunStore = defineStore("agent-run", () => {
     graph.value.runStatus === "streaming" || graph.value.runStatus === "resumed",
   );
 
+  const resolvedCheckpoints = computed(() => {
+    const result: Record<string, { decision: string }> = {};
+    for (const [, cp] of Object.entries(graph.value.checkpoints)) {
+      if (cp.resolved && cp.decision) {
+        result[cp.nodeId] = { decision: cp.decision };
+      }
+    }
+    return result;
+  });
+
   function flush() {
     if (queue.value.length === 0) {
       raf = 0;
@@ -38,11 +48,17 @@ export const useAgentRunStore = defineStore("agent-run", () => {
   }
 
   function enqueue(event: AgentEvent) {
+    // Guard against stale events from a previous run's stream
+    if (activeRunId && event.runId !== activeRunId) return;
     queue.value.push(event);
     if (!raf) raf = requestAnimationFrame(flush);
   }
 
   function closeStream() {
+    if (raf) {
+      cancelAnimationFrame(raf);
+      raf = 0;
+    }
     if (currentSource) {
       currentSource.close();
       currentSource = null;
@@ -63,7 +79,10 @@ export const useAgentRunStore = defineStore("agent-run", () => {
     graph.value = createInitialGraphState();
     const runId = await startRunRequest(prompt, projectPath);
     activeRunId = runId;
-    currentSource = connectRunStream(runId, enqueue);
+    currentSource = connectRunStream(runId, enqueue, () => {
+      // SSE gave up reconnecting — mark run as errored
+      graph.value = { ...graph.value, runStatus: "error" };
+    });
   }
 
   async function intervene(
@@ -86,6 +105,7 @@ export const useAgentRunStore = defineStore("agent-run", () => {
     graph,
     nodes,
     currentCheckpoint,
+    resolvedCheckpoints,
     stepInfo,
     isRunning,
     startRun,

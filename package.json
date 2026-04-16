@@ -7,8 +7,14 @@
     "packages/*"
   ],
   "scripts": {
+    "dev": "npm run dev:server & npm run dev:web",
     "dev:server": "npm run dev -w @acv/server",
     "dev:web": "npm run dev -w @acv/web",
-    "build": "npm run build -w @acv/shared && npm run build -w @acv/server && npm run build -w @acv/web"
+    "build": "npm run build -w @acv/shared && npm run build -w @acv/server && npm run build -w @acv/web",
+    "test": "npm run test -w @acv/shared && npm run test -w @acv/server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "vitest": "^4.1.4"
   }
 }

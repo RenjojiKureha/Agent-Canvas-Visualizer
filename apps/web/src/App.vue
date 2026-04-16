@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, onUnmounted } from "vue";
 import DagCanvas from "./components/DagCanvas.vue";
 import HitlPanel from "./components/HitlPanel.vue";
 import { useAgentRunStore } from "./stores/agentRun";
 
 const store = useAgentRunStore();
+onUnmounted(() => store.closeStream());
 const prompt = ref("Please analyze this project structure and suggest improvements.");
 const projectPath = ref("");
 const loading = ref(false);
@@ -47,6 +48,7 @@ async function start() {
 }
 
 async function abort() {
+  if (!confirm("Are you sure you want to abort the current run?")) return;
   error.value = "";
   try {
     await store.interrupt("abort");
@@ -83,23 +85,23 @@ async function onHitlDecide(decision: string, note?: string, modifications?: Rec
     <div v-if="error" class="error-bar">{{ error }}</div>
 
     <section class="panel" style="margin-bottom: 12px">
-      <div style="font-size: 13px; color: var(--muted); margin-bottom: 6px">Project Path</div>
+      <div class="field-label">Project Path</div>
       <input
         v-model="projectPath"
         type="text"
         :disabled="isRunning"
         placeholder="Leave empty for server's working directory"
-        style="width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-size: 14px; font-family: monospace; background: var(--panel); color: var(--text)"
+        class="field-input mono"
       />
     </section>
 
     <section class="panel" style="margin-bottom: 12px">
-      <div style="font-size: 13px; color: var(--muted); margin-bottom: 6px">Prompt</div>
+      <div class="field-label">Prompt</div>
       <textarea
         v-model="prompt"
         rows="3"
         :disabled="isRunning"
-        style="width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 10px; resize: vertical"
+        class="field-input"
       />
     </section>
 
@@ -113,7 +115,7 @@ async function onHitlDecide(decision: string, note?: string, modifications?: Rec
       <div v-if="statusBanner" :class="['status-banner', statusBanner.cls]">
         {{ statusBanner.text }}
       </div>
-      <DagCanvas :nodes="store.nodes" :edges="store.graph.edges" />
+      <DagCanvas :nodes="store.nodes" :edges="store.graph.edges" :decisions="store.resolvedCheckpoints" />
     </section>
 
     <section v-if="checkpoint" style="margin-bottom: 12px">
