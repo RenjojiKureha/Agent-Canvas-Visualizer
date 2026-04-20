@@ -138,18 +138,21 @@ export interface GraphEdge {
 
 export type RunStatus = "idle" | "streaming" | "waiting_human" | "resumed" | "finished" | "error";
 
+export interface CheckpointState {
+  nodeId: string;
+  resolved: boolean;
+  decision?: string;
+  options?: string[];
+  context?: HitlContext;
+}
+
 export interface GraphState {
   runId?: string;
   runStatus: RunStatus;
   provider?: "api" | "claude";
   nodes: Record<string, GraphNode>;
   edges: GraphEdge[];
-  checkpoints: Record<string, {
-    nodeId: string;
-    resolved: boolean;
-    decision?: string;
-    context?: HitlContext;
-  }>;
+  checkpoints: Record<string, CheckpointState>;
   lastSeq: number;
   currentStep: number;
   maxSteps: number;

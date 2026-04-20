@@ -178,6 +178,7 @@ describe("applyEvent", () => {
       expect(state.checkpoints["cp1"]).toEqual({
         nodeId: "n1",
         resolved: false,
+        options: ["approve", "reject"],
         context: { kind: "tool_approval", toolName: "write_file" },
       });
     });
@@ -194,6 +195,7 @@ describe("applyEvent", () => {
       ]);
       expect(state.runStatus).toBe("waiting_human");
       expect(state.checkpoints["cp1"].nodeId).toBe("ghost");
+      expect(state.checkpoints["cp1"].options).toEqual(["approve"]);
       expect(state.nodes["ghost"]).toBeUndefined();
     });
   });

@@ -60,6 +60,7 @@ export function applyEvent(state: GraphState, event: AgentEvent): GraphState {
       newCheckpoints[event.checkpointId] = {
         nodeId: event.nodeId,
         resolved: false,
+        options: event.options,
         context: event.context,
       };
       const hitlNodes = { ...base.nodes };
