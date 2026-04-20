@@ -8,11 +8,9 @@ import { ClaudeLoop } from "./claudeLoop";
 import { createReadFileTool } from "./tools/readFile";
 import { createListFilesTool } from "./tools/listFiles";
 import { createWriteFileTool } from "./tools/writeFile";
+import { RUN_TTL_MS, CLEANUP_INTERVAL_MS, SSE_HEARTBEAT_MS } from "./config";
 
 type AgentProvider = "api" | "claude";
-
-const RUN_TTL_MS = 30 * 60 * 1000;
-const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
 type RunData = {
   seq: number;
@@ -33,7 +31,6 @@ export class RunManager {
     const providerRaw = (process.env.AGENT_PROVIDER || "api").toLowerCase();
     this.provider = providerRaw === "claude" ? "claude" : "api";
 
-    // Only create LlmClient for API provider
     this.llm = this.provider === "api" ? new LlmClient() : null;
 
     console.log(`[acv-server] agent provider: ${this.provider}`);
@@ -47,18 +44,14 @@ export class RunManager {
   private cleanup() {
     const now = Date.now();
     for (const [runId, run] of this.runs) {
-      // Clean up finished runs after TTL
       if (run.finishedAt && now - run.finishedAt > RUN_TTL_MS) {
         this.runs.delete(runId);
         continue;
       }
-      // Auto-abort orphaned runs: no clients connected, HITL waiting, not finished
       if (!run.finishedAt && run.clients.size === 0 && run.hitl.getPendingCheckpointId()) {
         console.log(`[acv-server] auto-aborting orphaned run ${runId}`);
         run.hitl.enqueueInterrupt({ type: "abort" });
-        // Also resolve any pending checkpoint so the loop can exit
-        const cpId = run.hitl.getPendingCheckpointId();
-        if (cpId) run.hitl.resolveCheckpoint(cpId, "finish");
+        run.hitl.cancelCheckpoint("orphaned — no SSE clients");
       }
     }
   }
@@ -73,7 +66,6 @@ export class RunManager {
     };
 
     if (this.provider === "claude") {
-      // Claude Code CLI mode
       const loop = new ClaudeLoop({ runId, prompt, hitl, emit, cwd: workDir });
 
       void loop.run().then(() => {
@@ -84,7 +76,6 @@ export class RunManager {
         run.finishedAt = Date.now();
       });
     } else {
-      // API mode — agent loop with tools
       const tools = new ToolRegistry();
       tools.register(createReadFileTool(workDir));
       tools.register(createListFilesTool(workDir));
@@ -125,9 +116,12 @@ export class RunManager {
     for (const event of history) this.writeSse(res, event);
 
     const hb = setInterval(() => {
-      res.write(`event: heartbeat\ndata: ${Date.now()}\n\n`);
-    }, 15000);
-    res.on("close", () => clearInterval(hb));
+      this.safeWrite(res, `event: heartbeat\ndata: ${Date.now()}\n\n`);
+    }, SSE_HEARTBEAT_MS);
+    res.on("close", () => {
+      clearInterval(hb);
+      this.removeClient(runId, res);
+    });
   }
 
   removeClient(runId: string, res: ServerResponse) {
@@ -156,9 +150,24 @@ export class RunManager {
   }
 
   private writeSse(res: ServerResponse, event: AgentEvent) {
-    res.write(`id: ${event.seq}\n`);
-    res.write(`event: ${event.type}\n`);
-    res.write(`data: ${JSON.stringify(event)}\n\n`);
+    const payload =
+      `id: ${event.seq}\n` +
+      `event: ${event.type}\n` +
+      `data: ${JSON.stringify(event)}\n\n`;
+    this.safeWrite(res, payload);
+  }
+
+  private safeWrite(res: ServerResponse, chunk: string) {
+    if (res.writableEnded || res.destroyed) return;
+    try {
+      res.write(chunk);
+    } catch (err) {
+      // Client disconnected between close event and next write — swallow.
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ERR_STREAM_DESTROYED" && code !== "ERR_STREAM_WRITE_AFTER_END") {
+        console.warn("[acv-server] SSE write failed:", (err as Error).message);
+      }
+    }
   }
 
   private ensureRun(runId: string): RunData {

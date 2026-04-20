@@ -18,9 +18,12 @@ interface PendingCheckpoint {
   resolve: (result: CheckpointResult) => void;
 }
 
+type InterruptListener = (msg: InterruptMessage) => void;
+
 export class HitlController {
   private pending: PendingCheckpoint | null = null;
   private interruptQueue: InterruptMessage[] = [];
+  private interruptListeners = new Set<InterruptListener>();
 
   awaitCheckpoint(context: HitlContext): { checkpointId: string; promise: Promise<CheckpointResult> } {
     const checkpointId = `cp_${randomUUID().slice(0, 8)}`;
@@ -41,12 +44,32 @@ export class HitlController {
     return true;
   }
 
+  /**
+   * Cancel any pending checkpoint with an abort signal.
+   * Used by the run lifecycle — clients should call this when a run is being
+   * torn down (e.g., orphaned). The waiting loop will see `decision === "abort"`.
+   */
+  cancelCheckpoint(reason = "run aborted"): boolean {
+    if (!this.pending) return false;
+    const cp = this.pending;
+    this.pending = null;
+    cp.resolve({ decision: "abort", note: reason });
+    return true;
+  }
+
   getPendingCheckpointId(): string | null {
     return this.pending?.id ?? null;
   }
 
   enqueueInterrupt(msg: InterruptMessage) {
     this.interruptQueue.push(msg);
+    for (const listener of this.interruptListeners) {
+      try {
+        listener(msg);
+      } catch (err) {
+        console.error("[hitl] interrupt listener threw:", err);
+      }
+    }
   }
 
   drainInterrupts(): InterruptMessage[] {
@@ -55,5 +78,15 @@ export class HitlController {
 
   hasAbort(): boolean {
     return this.interruptQueue.some((m) => m.type === "abort");
+  }
+
+  /**
+   * Subscribe to interrupts as they arrive. Returns an unsubscribe function.
+   * Listeners receive every new interrupt, but the queue is shared — callers
+   * still decide whether to `drainInterrupts` in their own loop.
+   */
+  onInterrupt(listener: InterruptListener): () => void {
+    this.interruptListeners.add(listener);
+    return () => this.interruptListeners.delete(listener);
   }
 }
