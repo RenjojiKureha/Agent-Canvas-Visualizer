@@ -1,5 +1,14 @@
 import OpenAI from "openai";
 
+type ChatCompletionChunk = OpenAI.Chat.Completions.ChatCompletionChunk;
+type ChatCompletionCreateParamsStreaming = OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
+type ChatCompletionCreateParamsNonStreaming = OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming;
+type ChatCompletionMessageParam = OpenAI.Chat.Completions.ChatCompletionMessageParam;
+type ChatCompletionTool = OpenAI.Chat.Completions.ChatCompletionTool;
+
+export type LlmMessage = ChatCompletionMessageParam;
+export type LlmTool = ChatCompletionTool;
+
 export interface LlmToolCall {
   id: string;
   name: string;
@@ -41,31 +50,28 @@ export class LlmClient {
   }
 
   async chat(
-    messages: Array<{ role: "system" | "user" | "assistant" | "tool"; content: string; tool_call_id?: string; tool_calls?: unknown[] }>,
-    tools?: Array<{ type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }>,
+    messages: ChatCompletionMessageParam[],
+    tools?: ChatCompletionTool[],
     onDelta?: OnDelta,
   ): Promise<LlmResponse> {
     if (!this.client) {
       throw new Error("LLM API key not configured. Set AGENT_API_KEY in .env");
     }
 
-    const params: Record<string, unknown> = {
-      model: this.model,
-      messages,
-      stream: true,
-    };
-    if (tools && tools.length > 0) {
-      params.tools = tools;
-    }
-
     let fullText = "";
     const toolCalls: Array<{ id: string; name: string; argStr: string }> = [];
 
     try {
-      const stream = await this.client.chat.completions.create(params as any) as unknown;
+      const streamParams: ChatCompletionCreateParamsStreaming = {
+        model: this.model,
+        messages,
+        stream: true,
+        ...(tools && tools.length > 0 ? { tools } : {}),
+      };
+      const stream = await this.client.chat.completions.create(streamParams);
 
-      for await (const chunk of stream as AsyncIterable<any>) {
-        const choice = chunk?.choices?.[0];
+      for await (const chunk of stream as AsyncIterable<ChatCompletionChunk>) {
+        const choice = chunk.choices?.[0];
         if (!choice) continue;
 
         const textDelta = choice.delta?.content;
@@ -106,28 +112,32 @@ export class LlmClient {
   }
 
   private async chatNonStream(
-    messages: Array<{ role: string; content: string; tool_call_id?: string }>,
-    tools?: unknown[],
+    messages: ChatCompletionMessageParam[],
+    tools?: ChatCompletionTool[],
   ): Promise<LlmResponse> {
     if (!this.client) throw new Error("client not initialized");
 
-    const params: Record<string, unknown> = {
+    const params: ChatCompletionCreateParamsNonStreaming = {
       model: this.model,
       messages,
       stream: false,
+      ...(tools && tools.length > 0 ? { tools } : {}),
     };
-    if (tools && (tools as unknown[]).length > 0) params.tools = tools;
 
-    const resp: any = await this.client.chat.completions.create(params as any);
-    const choice = resp?.choices?.[0];
+    const resp = await this.client.chat.completions.create(params);
+    const choice = resp.choices?.[0];
     const text = choice?.message?.content || "";
     const rawToolCalls = choice?.message?.tool_calls || [];
 
-    const toolCalls: LlmToolCall[] = rawToolCalls.map((tc: any) => {
-      let args: Record<string, unknown> = {};
-      try { args = JSON.parse(tc.function?.arguments || "{}"); } catch { /* use empty */ }
-      return { id: tc.id || "", name: tc.function?.name || "", args };
-    });
+    const toolCalls: LlmToolCall[] = rawToolCalls
+      .filter((tc): tc is Extract<typeof tc, { type: "function" }> =>
+        (tc as { type?: string }).type === "function",
+      )
+      .map((tc) => {
+        let args: Record<string, unknown> = {};
+        try { args = JSON.parse(tc.function.arguments || "{}"); } catch { /* use empty */ }
+        return { id: tc.id || "", name: tc.function.name || "", args };
+      });
 
     return { text, toolCalls };
   }

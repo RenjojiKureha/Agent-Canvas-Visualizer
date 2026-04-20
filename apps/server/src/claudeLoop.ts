@@ -1,89 +1,70 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import type { HitlController } from "./hitl";
-import type { EmitPayload, HitlContext } from "@acv/shared";
+import { BaseLoop, type BaseLoopOptions } from "./baseLoop";
 import { handleAnswerDecision } from "./hitlDecision";
+import {
+  type ClaudeContentBlock,
+  type ClaudeStreamEvent,
+  isAssistantEvent,
+  isResultEvent,
+  isThinkingBlock,
+  isToolUseBlock,
+  isTextBlock,
+} from "./claudeStreamTypes";
 
-type EmitFn = (event: EmitPayload) => void;
-
-interface ClaudeLoopOptions {
-  runId: string;
-  prompt: string;
-  hitl: HitlController;
-  emit: EmitFn;
+interface ClaudeLoopOptions extends BaseLoopOptions {
   claudeCommand?: string;
   cwd?: string;
 }
 
-/**
- * Runs Claude Code CLI and maps its stream-json output to DAG nodes.
- *
- * Real CLI output format (verified):
- *   {"type":"system","subtype":"init",...}
- *   {"type":"assistant","message":{"content":[{"type":"thinking","thinking":"..."}]}}
- *   {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{...}}]}}
- *   {"type":"assistant","message":{"content":[{"type":"text","text":"answer"}]}}
- *   {"type":"result","subtype":"success","result":"..."}
- */
-export class ClaudeLoop {
+export class ClaudeLoop extends BaseLoop {
   private claudeCommand: string;
+  private cwd?: string;
   private child: ChildProcess | null = null;
-  private aborted = false;
-  private nodeSeq = 0;
 
-  // Mutable state for building the DAG
   private currentThinkNodeId: string | null = null;
   private currentThinkText = "";
   private lastParentNodeId: string | null = null;
   private finalText = "";
 
-  constructor(private opts: ClaudeLoopOptions) {
+  constructor(opts: ClaudeLoopOptions) {
+    super(opts);
     this.claudeCommand = opts.claudeCommand || process.env.AGENT_COMMAND || "claude";
+    this.cwd = opts.cwd;
   }
 
   async run(): Promise<void> {
-    const { emit, prompt } = this.opts;
+    this.emit({ type: "run_started", provider: "claude" });
 
-    emit({ type: "run_started", provider: "claude" });
+    const unsubscribe = this.base.hitl.onInterrupt((msg) => {
+      if (msg.type === "abort") this.abort();
+    });
 
     try {
-      await this.spawnClaude(prompt);
+      await this.spawnClaude(this.base.prompt);
 
       if (this.aborted) {
-        emit({ type: "run_finished", status: "aborted" });
+        this.emitFinished("aborted");
         return;
       }
 
-      // Finalize last thinking node if still open
       this.finalizeThinkingNode();
 
-      // Create answer node and HITL checkpoint
       const answerText = this.finalText || "(empty response)";
       await this.answerCheckpointLoop(answerText);
-
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const errNodeId = this.nextNodeId();
-      emit({
-        type: "node_created",
-        nodeId: errNodeId,
-        role: "error",
-        content: `Claude CLI error: ${msg}`,
-        status: "error",
-      });
-      emit({ type: "run_finished", status: "failed" });
+      this.emitFailure(`Claude CLI error: ${msg}`);
+    } finally {
+      unsubscribe();
     }
   }
 
-  /**
-   * HITL loop: show answer, wait for user decision, revise if needed.
-   */
   private async answerCheckpointLoop(answerText: string): Promise<void> {
-    const { emit, hitl } = this.opts;
     let currentAnswer = answerText;
 
     while (true) {
       const answerNodeId = this.nextNodeId();
-      emit({
+      this.emit({
         type: "node_created",
         nodeId: answerNodeId,
         parentId: this.lastParentNodeId ?? undefined,
@@ -92,19 +73,24 @@ export class ClaudeLoop {
         status: "waiting_human",
       });
       if (this.lastParentNodeId) {
-        emit({ type: "edge_created", from: this.lastParentNodeId, to: answerNodeId, kind: "depends" });
+        this.emit({ type: "edge_created", from: this.lastParentNodeId, to: answerNodeId, kind: "depends" });
       }
 
       const { decision, hitlNodeId } = await handleAnswerDecision({
         answerNodeId,
-        hitl,
-        emit,
+        hitl: this.base.hitl,
+        emit: (e) => this.emit(e),
         nextNodeId: () => this.nextNodeId(),
         answer: currentAnswer,
       });
 
       if (decision.decision === "finish") {
-        emit({ type: "run_finished", status: "success" });
+        this.emitFinished("success");
+        return;
+      }
+      if (decision.decision === "abort") {
+        this.aborted = true;
+        this.emitFinished("aborted");
         return;
       }
 
@@ -127,14 +113,7 @@ export class ClaudeLoop {
         currentAnswer = this.finalText || "(empty response)";
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        emit({
-          type: "node_created",
-          nodeId: this.nextNodeId(),
-          role: "error",
-          content: `${decision.decision === "continue" ? "Continue" : "Revision"} failed: ${msg}`,
-          status: "error",
-        });
-        emit({ type: "run_finished", status: "failed" });
+        this.emitFailure(`${decision.decision === "continue" ? "Continue" : "Revision"} failed: ${msg}`);
         return;
       }
     }
@@ -149,8 +128,6 @@ export class ClaudeLoop {
 
   private spawnClaude(prompt: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      const { emit } = this.opts;
-
       const args = [
         "-p",
         "--verbose",
@@ -162,10 +139,9 @@ export class ClaudeLoop {
         shell: true,
         env: process.env,
         windowsHide: true,
-        cwd: this.opts.cwd || undefined,
+        cwd: this.cwd || undefined,
       });
 
-      // Pass prompt via stdin to avoid shell argument splitting
       this.child.stdin!.write(prompt);
       this.child.stdin!.end();
 
@@ -176,31 +152,27 @@ export class ClaudeLoop {
         const trimmed = line.trim();
         if (!trimmed) return;
 
-        let obj: any;
+        let evt: ClaudeStreamEvent;
         try {
-          obj = JSON.parse(trimmed);
+          evt = JSON.parse(trimmed) as ClaudeStreamEvent;
         } catch {
           return;
         }
 
-        // Skip system events (hooks, init)
-        if (obj?.type === "system") return;
+        if (evt.type === "system") return;
 
-        // Handle assistant messages
-        if (obj?.type === "assistant") {
-          const content = obj.message?.content;
+        if (isAssistantEvent(evt)) {
+          const content = evt.message?.content;
           if (!Array.isArray(content)) return;
-
           for (const block of content) {
             this.handleContentBlock(block);
           }
           return;
         }
 
-        // Handle final result — capture text for answer node
-        if (obj?.type === "result") {
-          if (typeof obj.result === "string" && obj.result.length > 0) {
-            this.finalText = obj.result;
+        if (isResultEvent(evt)) {
+          if (typeof evt.result === "string" && evt.result.length > 0) {
+            this.finalText = evt.result;
           }
           return;
         }
@@ -240,28 +212,14 @@ export class ClaudeLoop {
           reject(new Error(errMsg));
         }
       });
-
-      // Poll for abort interrupts
-      const checkAbort = setInterval(() => {
-        const interrupts = this.opts.hitl.drainInterrupts();
-        for (const intr of interrupts) {
-          if (intr.type === "abort") {
-            this.abort();
-          }
-        }
-      }, 500);
-      this.child.on("close", () => clearInterval(checkAbort));
     });
   }
 
-  private handleContentBlock(block: any): void {
-    const { emit } = this.opts;
-
-    // Thinking block
-    if (block.type === "thinking" && typeof block.thinking === "string") {
+  private handleContentBlock(block: ClaudeContentBlock): void {
+    if (isThinkingBlock(block)) {
       this.ensureThinkingNode();
       this.currentThinkText += block.thinking;
-      emit({
+      this.emit({
         type: "node_updated",
         nodeId: this.currentThinkNodeId!,
         patch: { content: this.currentThinkText, status: "streaming" },
@@ -269,15 +227,14 @@ export class ClaudeLoop {
       return;
     }
 
-    // Tool use block — CLI has already executed this tool
-    if (block.type === "tool_use") {
+    if (isToolUseBlock(block)) {
       this.finalizeThinkingNode();
 
       const toolNodeId = this.nextNodeId();
       const toolName = block.name || "unknown_tool";
       const toolArgs = block.input || {};
 
-      emit({
+      this.emit({
         type: "node_created",
         nodeId: toolNodeId,
         parentId: this.lastParentNodeId ?? undefined,
@@ -288,19 +245,18 @@ export class ClaudeLoop {
         toolArgs,
       });
       if (this.lastParentNodeId) {
-        emit({ type: "edge_created", from: this.lastParentNodeId, to: toolNodeId, kind: "tool" });
+        this.emit({ type: "edge_created", from: this.lastParentNodeId, to: toolNodeId, kind: "tool" });
       }
 
       this.lastParentNodeId = toolNodeId;
       return;
     }
 
-    // Text block — update current thinking node
-    if (block.type === "text" && typeof block.text === "string") {
+    if (isTextBlock(block)) {
       this.ensureThinkingNode();
       this.currentThinkText += block.text;
-      this.finalText = this.currentThinkText; // Keep as candidate for final answer
-      emit({
+      this.finalText = this.currentThinkText;
+      this.emit({
         type: "node_updated",
         nodeId: this.currentThinkNodeId!,
         patch: { content: this.currentThinkText, status: "streaming" },
@@ -316,7 +272,7 @@ export class ClaudeLoop {
     this.currentThinkNodeId = nodeId;
     this.currentThinkText = "";
 
-    this.opts.emit({
+    this.emit({
       type: "node_created",
       nodeId,
       parentId: this.lastParentNodeId ?? undefined,
@@ -325,7 +281,7 @@ export class ClaudeLoop {
       status: "streaming",
     });
     if (this.lastParentNodeId) {
-      this.opts.emit({ type: "edge_created", from: this.lastParentNodeId, to: nodeId, kind: "depends" });
+      this.emit({ type: "edge_created", from: this.lastParentNodeId, to: nodeId, kind: "depends" });
     }
 
     this.lastParentNodeId = nodeId;
@@ -334,7 +290,7 @@ export class ClaudeLoop {
   private finalizeThinkingNode(): void {
     if (!this.currentThinkNodeId) return;
 
-    this.opts.emit({
+    this.emit({
       type: "node_updated",
       nodeId: this.currentThinkNodeId,
       patch: {
@@ -344,10 +300,5 @@ export class ClaudeLoop {
     });
 
     this.currentThinkNodeId = null;
-  }
-
-  private nextNodeId(): string {
-    this.nodeSeq++;
-    return `n${this.nodeSeq}`;
   }
 }
